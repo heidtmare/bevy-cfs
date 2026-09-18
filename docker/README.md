@@ -23,11 +23,31 @@ command`.
 `to_lab` computes its port as `TO_LAB_MISSION_TLM_PORT + processor_id - 1`, and
 the mission default is now 2234, so cpu1 emits on 2234.
 
+## Getting telemetry out to the host
+
+`to_lab` sends telemetry to whatever address the enable-output command names, so
+that address has to be **this machine as cFS sees it** — the Docker Desktop host
+gateway, and it must be **IPv4**, because `dest_IP` is a 16-octet string field:
+
+```sh
+docker exec docker-cfs-1 getent ahostsv4 host.docker.internal | head -1
+# 192.168.65.254  host.docker.internal
+```
+
+```sh
+cargo run -p viz -- --dest-ip 192.168.65.254
+```
+
+That works — telemetry arrives on the host's UDP 2234 with no relay and no VM.
+An earlier version of this file said Docker Desktop does not forward UDP to the
+macOS host. **That was wrong**: the probe used `host.docker.internal`, which
+resolves to IPv6 here, so it was testing an unreachable destination rather than
+a blocked transport. See [../docs/findings/0005-vertical-slice.md](../docs/findings/0005-vertical-slice.md).
+
 ## Capturing telemetry
 
-Docker Desktop **does not forward UDP from a container to the macOS host**. TCP
-works; UDP silently vanishes, firewall or no firewall. So the capture runs inside
-the cFS container's network namespace:
+Capturing from inside the container's network namespace still works and needs no
+gateway address at all, which is why the committed fixture was taken this way:
 
 ```sh
 docker run --rm --network=container:docker-cfs-1 \
@@ -40,9 +60,11 @@ docker run --rm --network=container:docker-cfs-1 \
 `CARGO_TARGET_DIR` is redirected so the Linux build does not collide with the
 host's `target/`.
 
-A Bevy app on macOS therefore cannot receive live telemetry from this container
-directly — `docs/findings/0002` §4 lists the options. Development against
-`fake-cfs` and fixture replay needs none of them.
+From the host, pass the gateway instead:
+
+```sh
+cargo run -p tlm-capture -- --dest-ip 192.168.65.254 --seconds 12 --out fixtures/hk.cfspkt
+```
 
 ## Debugging a silent link
 
@@ -68,7 +90,8 @@ IDs — which were fine.
   Silicon) rather than emulating x86_64. Uncomment the `platform:` pin if
   something turns out to be architecture-specific.
 - **`host.docker.internal` resolves to IPv6** here, and `to_lab`'s `dest_IP`
-  field is 16 octets — IPv4 only. Use `getent ahostsv4` if you need that address.
+  field is 16 octets — IPv4 only. Use `getent ahostsv4`. This one trap is
+  responsible for an entire wrong finding; see 0005.
 
 ## Changing the pinned version
 

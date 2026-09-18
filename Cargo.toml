@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "apps/viz",
     "crates/bevy_cfs",
     "crates/ccsds",
     "crates/cfs-msg",
@@ -12,9 +13,9 @@ members = [
     "tools/gltf-gen",
     "spikes/anim-mappings",
 ]
-# NOTE: only spikes/anim-mappings pulls a renderer. Everything else builds and
-# tests without a GPU, which is what keeps `cargo test --workspace` usable in CI.
-# apps/viz joins in Phase 4.
+# NOTE: only apps/viz and spikes/anim-mappings pull a renderer. Everything else
+# builds and tests without a GPU, which is what keeps `cargo test --workspace`
+# usable in CI and keeps the reusable crates honest about their dependencies.
 
 [workspace.package]
 version = "0.1.0"

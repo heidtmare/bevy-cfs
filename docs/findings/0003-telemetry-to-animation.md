@@ -87,11 +87,29 @@ Two details that make it meaningful:
   it sent the held packet *before* its successor — and passed anyway. A
   fault-injection test that cannot detect its own no-op is decoration.
 
+## Amended in Phase 4
+
+Two things in this finding were superseded:
+
+- The demo packets `fake-cfs` emits now carry cFE's four-octet telemetry-header
+  spare, because real cFE payloads start at octet 16 and a stand-in framed
+  differently trains the decoder on the wrong layout. See
+  [0005](0005-vertical-slice.md).
+- `fake-cfs serve --rate N` was delivering about 0.78 N, and the resulting
+  irregular arrivals made the jitter buffer run off the end of its window —
+  which read as a buffer defect and was not one. Fixed in the generator; the
+  buffer was checked against clean arrivals and reports the rate exactly.
+
 ## Ports: a local collision
 
 The cFS container publishes UDP 1234, so `fake-cfs serve` cannot bind the default
 command port while the container is up — it exits with "Address already in use".
 Run it on other ports (`--cmd-port 11234 --tlm-port 11235`) or stop the container.
+
+## Answered since
+
+[0004](0004-animation-mappings.md) compared the three mappings and produced the
+recommendation table; [0005](0005-vertical-slice.md) applies it against live cFS.
 
 ## Open for Phase 3
 

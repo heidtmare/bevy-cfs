@@ -1,8 +1,9 @@
 # 0001 — Verification backlog
 
-**Status:** mostly resolved by [0002](0002-cfs-bring-up.md), which captured real
-telemetry from cFS v7.0.1 and verified the decoder against it. Items 1-5 are
-confirmed **for that build**; items 6 and 7 remain open.
+**Status:** closed. Items 1-5 were resolved by [0002](0002-cfs-bring-up.md),
+which captured real telemetry from cFS v7.0.1 and verified the decoder against
+it. Items 6 and 7 were resolved by [0005](0005-vertical-slice.md), which decoded
+the first real *payload* — and found an off-by-four in the process.
 
 Everything here started as an assumption baked into the Rust code on the basis of
 how cFS has historically worked. Each entry now records how it turned out. They
@@ -84,7 +85,7 @@ TAI-based by default), not the Unix epoch.
 cFE's own console timestamps (`1980-012-14:03:20`) exactly. Absolute times are
 now meaningful, not just differences.
 
-## 6. Command checksum — STILL OPEN — `crates/ccsds/src/secondary.rs`
+## 6. Command checksum — RESOLVED — `crates/ccsds/src/secondary.rs`
 
 Assumed XOR of all octets seeded with `0xFF`, computed with the checksum octet
 zeroed.
@@ -95,10 +96,18 @@ zeroed.
 checksums, so a wrong value will be accepted — which is exactly why this must be
 checked against source rather than against observed behavior.
 
-**Status:** still open, and the bring-up did **not** settle it. Our commands were
-accepted, but that is equally consistent with a wrong checksum being ignored.
+**Outcome:** correct as assumed. `CFE_MSG_ComputeCheckSum` in the pinned build
+seeds `0xFF` and XORs every octet of the whole packet, with the checksum octet
+zeroed by `CFE_MSG_GenerateChecksum` before computing. `ccsds::compute_checksum`
+skips that octet rather than XORing a zero, which is the same operation.
 
-## 7. Payload endianness — STILL OPEN — `crates/telemetry-model/src/lib.rs`
+The bring-up genuinely did not settle this, and the reason is now confirmed from
+the other side too: `ci_lab` reports **`EnableChecksums = 0`** in its own
+housekeeping on this build, so it does not validate. Acceptance of our commands
+was evidence of nothing. The answer had to come from the source, and did — see
+[0005](0005-vertical-slice.md).
+
+## 7. Payload endianness — RESOLVED — `crates/cfs-msg/src/hk.rs`
 
 The demo decoder reads little-endian payload fields, matching a native x86/ARM
 build. CCSDS *headers* are always big-endian, but payloads follow the build.
@@ -108,5 +117,21 @@ build. CCSDS *headers* are always big-endian, but payloads follow the build.
 **Symptom if wrong:** wildly wrong magnitudes — obvious the moment a real packet
 is decoded.
 
-**Status:** still open. The capture verified *headers* only; no payload field has
-been decoded from a real packet yet. The first real payload decode settles it.
+**Outcome:** **little-endian**, as assumed — but the item was right about the
+danger and wrong about where it lay.
+
+The proof is a rate, not a magnitude. Two `CI_LAB` housekeeping packets five
+seconds apart bracket exactly one enable-output keepalive: little-endian,
+`IngestPackets` reads 7 then 8; big-endian, 117,440,512 then 134,217,728.
+Cross-checked against `TO_LAB`'s `CommandCounter` in the same two packets.
+Pinned in `crates/cfs-msg/tests/real_payloads.rs`.
+
+Note this is a property of the **target**, not of cFS — payloads are raw C
+structs in native order, and a big-endian flight target flips it.
+
+**What this item missed.** Byte order was never the bug. The bug was the payload
+*offset*: `CFE_MSG_TelemetryHeader_t` carries four octets of alignment spare
+after the timestamp, so real payloads start at octet 16 and the decoder was
+reading from 12. Same symptom class — plausible garbage, no error anywhere — and
+it survived three phases because headers had been verified exhaustively and the
+bytes after them never had. See [0005](0005-vertical-slice.md).

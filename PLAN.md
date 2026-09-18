@@ -43,13 +43,16 @@ and C are the investigation.
 **Exit criterion:** `docker compose up cfs` produces a running `core-cpu1` that emits telemetry on a
 host-reachable UDP port, reproducible from a clean clone.
 
-> **Done, with one amendment** — see `docs/findings/0002`. cFS v7.0.1 builds and runs, but
-> "host-reachable" turned out to be unachievable on Docker Desktop for macOS: it does not forward
-> UDP from a container to the host. Telemetry is reachable from *inside* the container network,
-> which is enough for Phase 0/1 (capturing fixtures) but changes Phase 2 and Phase 4: a native Bevy
-> app on macOS needs a UDP→TCP relay, a bridged Linux VM, or a Linux host for live telemetry.
-> Development against `fake-cfs` and fixture replay is unaffected, which is precisely why that
-> stand-in was built first.
+> **Done** — see `docs/findings/0002`. cFS v7.0.1 builds and runs on a host-reachable UDP port,
+> reproducible from a clean clone.
+>
+> This amendment previously said Docker Desktop for macOS does not forward UDP from a container to
+> the host, and that Phase 4 would therefore need a UDP→TCP relay or a Linux VM. **That was wrong**,
+> and Phase 4 found out: telemetry reaches the host over plain UDP as long as `to_lab` is pointed at
+> the **IPv4** gateway (`getent ahostsv4 host.docker.internal`, `192.168.65.254` here). The original
+> probe used the `host.docker.internal` name, which resolves to IPv6 — an unreachable destination,
+> not a blocked transport. See `docs/findings/0005`. No relay was ever built, so the cost of the
+> mistake was one paragraph of wrong documentation.
 
 ---
 
@@ -165,6 +168,26 @@ forces you to confront command authentication/validation questions early.
 
 Record a screen capture against live cFS and against a replayed fixture.
 
+**Gate:** the loop closes — a command sent from the viz produces an observable change in telemetry
+that the viz displays, against real cFS.
+
+> **Done.** See [docs/findings/0005-vertical-slice.md](docs/findings/0005-vertical-slice.md).
+> `apps/viz` runs against the container over plain UDP; **N** sends a `SAMPLE_APP` no-op and the
+> `CommandCounter` it increments comes back on the downlink 0.90-5.52 s later (mean 2.94 s over
+> twelve round trips — a scheduler cadence, not network latency). Screenshots against live cFS and
+> against `fake-cfs` are committed under `docs/findings/images/`.
+>
+> Two things the gate did not anticipate. First, decoding the first real *payload* exposed a
+> four-octet offset bug — `CFE_MSG_TelemetryHeader_t` has an alignment spare, so cFE payloads start
+> at octet 16 — which had survived three phases because only headers had ever been verified. That
+> closed verification-backlog items 6 and 7 as well. Second, stock cFS publishes **no vehicle
+> dynamics** at all, so the viz names the real cFE field behind each animated signal and shows
+> `-- no source --` for attitude and wheel speeds rather than inventing them.
+>
+> On command authentication, which the gate predicted would surface: it did. `ci_lab` accepts any
+> well-formed datagram on UDP 1234, and reports `EnableChecksums = 0` in its own housekeeping —
+> it does not validate. Fine for a lab build; worth stating before anyone points it at a vehicle.
+
 ---
 
 ## 8. Phase 5 — Rust-inside-cFS spike (Architecture B) (1 week, time-boxed hard)
@@ -195,12 +218,16 @@ crates/
   cfs-msg/                 # cFE/lab message types (+ EDS codegen evaluation)
   cfs-link/                # UDP transport, handshake, reconnect, link metrics
   telemetry-model/         # decoded packets -> domain state
+  telemetry-anim/          # domain state -> animation maths, no Bevy
   bevy_cfs/                # Bevy plugin: resources, events, time sync, interpolation
 apps/
   viz/                     # the Bevy application
 tools/
   fake-cfs/                # synthetic generator + fixture replayer
+  tlm-capture/             # record real telemetry to a fixture
+  gltf-gen/                # generates assets/spacecraft.gltf
 spikes/
+  anim-mappings/           # Phase 3 mapping comparison
   rust-cfs-app/            # Phase 5 FFI spike
 docker/                    # cFS build + runtime images, compose file
 fixtures/                  # captured packets (golden tests)
@@ -209,9 +236,10 @@ docs/
 assets/                    # glTF model + authored clips
 ```
 
-**Discipline:** `crates/ccsds`, `crates/cfs-msg`, and `crates/telemetry-model` must not depend on
-Bevy. If Architecture B or C goes ahead, those three crates are what gets reused on the flight side,
-and a Bevy dependency there would kill that option.
+**Discipline:** `crates/ccsds`, `crates/cfs-msg`, `crates/telemetry-model` and `crates/telemetry-anim`
+must not depend on Bevy, and are built `no_std` in CI so the claim is checked rather than asserted.
+If Architecture B or C goes ahead, those four crates are what gets reused on the flight side, and a
+Bevy dependency there would kill that option.
 
 ---
 

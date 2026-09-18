@@ -73,7 +73,21 @@ path fail independently, and only the telemetry side was wrong.
 after a long detour. **Sniff before theorising** is the lesson; a link with no
 packets and no errors is a routing question, not a decoding one.
 
-## 4. Docker Desktop does not forward UDP to the macOS host
+## 4. Docker Desktop does not forward UDP to the macOS host — **WRONG, see below**
+
+> **Corrected in Phase 4.** This conclusion is false. Container → host UDP works
+> fine on the same Docker Desktop 4.82, provided the destination is the **IPv4**
+> gateway address (`192.168.65.254` here, from `getent ahostsv4`). The original
+> probe used the `host.docker.internal` name, which resolves to IPv6 on this
+> setup — so it was testing an unreachable destination, not a blocked transport.
+> An unreachable address and a blocked transport look identical from the sending
+> end, and the two were never separated.
+>
+> The section is kept rather than deleted because the wrong turn is part of the
+> record, and because the traps below it are real. Everything from "Consequence
+> for Phase 2" onward is superseded by
+> [0005](0005-vertical-slice.md); `apps/viz` takes live telemetry over plain UDP
+> and the relay was never needed.
 
 Container → host UDP does not traverse the Docker Desktop gateway. A plain
 `nc -u` to `host.docker.internal` from the container's network namespace never
@@ -113,9 +127,7 @@ telemetry from cFS in Docker Desktop. Options, in the order they should be tried
 
 ## Still open
 
-- **Checksum (item 6):** untested. `ci_lab` accepted our commands, but it does not
-  validate checksums, so this proves nothing. Needs checking against
-  `CFE_MSG_ComputeCheckSum`.
-- **Payload endianness (item 7):** not yet exercised — no payload field has been
-  decoded from a real packet, only headers. The first real payload decode settles it.
+- ~~**Checksum (item 6)**~~ and ~~**payload endianness (item 7)**~~ — both
+  resolved in Phase 4 by reading `CFE_MSG_ComputeCheckSum` and decoding the
+  first real payload. See [0005](0005-vertical-slice.md).
 - **`native_eds` message IDs:** unknown, and the more interesting configuration.

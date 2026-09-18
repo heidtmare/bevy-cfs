@@ -20,7 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ccsds::{PacketType, PrimaryHeader, TlmSecondaryHeader};
 use cfs_msg::{MsgIds, to_lab};
 use telemetry_model::{
-    DEMO_PAYLOAD_LEN, Mode, Quat, SpacecraftState, encode_demo_payload,
+    DEMO_PAYLOAD_LEN, DEMO_PAYLOAD_OFFSET, Mode, Quat, SpacecraftState, encode_demo_payload,
 };
 
 const USAGE: &str = "\
@@ -64,7 +64,12 @@ fn serve(args: &[String]) -> std::io::Result<()> {
     let rate: f64 = flag(args, "--rate", 10.0);
 
     let cmd_socket = UdpSocket::bind(("0.0.0.0", cmd_port))?;
-    cmd_socket.set_read_timeout(Some(Duration::from_millis(50)))?;
+    // Short, because this timeout is also the resolution of the send schedule:
+    // the loop cannot send more often than it wakes. At 50 ms a requested 8 Hz
+    // came out as 6.2 Hz measured, which is exactly the kind of quiet
+    // inaccuracy a stand-in must not have — the whole point of `fake-cfs` is
+    // that behaviour observed against it transfers to cFS.
+    cmd_socket.set_read_timeout(Some(Duration::from_millis(2)))?;
     let tlm_socket = UdpSocket::bind(("0.0.0.0", 0))?;
     println!("fake-cfs: listening for commands on {cmd_port}, telemetry at {rate} Hz once enabled");
 
@@ -91,13 +96,18 @@ fn serve(args: &[String]) -> std::io::Result<()> {
 
         let now = Instant::now();
         if now >= next_send {
-            next_send = now + period;
+            // Advance the schedule by exactly one period rather than restarting
+            // it from now, so a late wake-up does not push every later packet
+            // late as well.
+            next_send += period;
+            if next_send < now {
+                next_send = now + period;
+            }
             if let Some(addr) = dest {
                 let pkt = build_demo_packet(&mut seq, start.elapsed().as_secs_f64());
                 tlm_socket.send_to(&pkt, addr)?;
             }
         }
-        std::thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -125,8 +135,11 @@ fn handle_command(packet: &[u8], from: IpAddr, tlm_port: u16) -> Option<SocketAd
 }
 
 /// A demo telemetry packet matching `telemetry_model::decode_demo`.
+///
+/// Framed exactly as cFE frames telemetry, alignment spare included, so the
+/// offline path exercises the same offsets as the live one.
 fn build_demo_packet(seq: &mut u16, t: f64) -> Vec<u8> {
-    let total = 6 + TlmSecondaryHeader::LEN + DEMO_PAYLOAD_LEN;
+    let total = DEMO_PAYLOAD_OFFSET + DEMO_PAYLOAD_LEN;
     let mut pkt = vec![0u8; total];
 
     let hdr = PrimaryHeader::for_total_len(
@@ -145,8 +158,10 @@ fn build_demo_packet(seq: &mut u16, t: f64) -> Vec<u8> {
         seconds: now.as_secs() as u32,
         subseconds: (now.subsec_nanos() as f64 / 1e9 * 65536.0) as u16,
     }
-    .write(&mut pkt[6..12])
+    .write(&mut pkt[6..6 + TlmSecondaryHeader::LEN])
     .unwrap();
+    // pkt[12..16] is CFE_MSG_TelemetryHeader_t::Spare — four octets of
+    // alignment padding that cFE writes and every decoder must skip.
 
     // Slow yaw sweep, a rotating solar array, and a deployment that runs once
     // over the first 20 seconds — enough motion to exercise every Phase 3
@@ -177,7 +192,7 @@ fn build_demo_packet(seq: &mut u16, t: f64) -> Vec<u8> {
 
     let mut payload = [0u8; DEMO_PAYLOAD_LEN];
     encode_demo_payload(&state, &mut payload);
-    pkt[12..].copy_from_slice(&payload);
+    pkt[DEMO_PAYLOAD_OFFSET..].copy_from_slice(&payload);
 
     pkt
 }

@@ -1,0 +1,19 @@
+[package]
+name = "viz"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Phase 4 vertical slice: a 3D spacecraft driven by live cFS telemetry, with a command path back."
+
+[dependencies]
+# One of two crates in the workspace that wants a GPU; everything below it
+# stays headless so `cargo test --workspace` needs no display.
+bevy = "0.19"
+
+bevy_cfs = { workspace = true }
+telemetry-anim = { workspace = true, features = ["std"] }
+telemetry-model = { workspace = true, features = ["std"] }
+cfs-link = { workspace = true }
+cfs-msg = { workspace = true, features = ["std"] }

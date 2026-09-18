@@ -26,6 +26,10 @@
 
 use bevy::animation::{RepeatAnimation, graph::AnimationNodeIndex};
 use bevy::app::AnimationSystems;
+use bevy::asset::RenderAssetUsages;
+use bevy::camera::RenderTarget;
+use bevy::image::Image;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use bevy::gltf::{Gltf, GltfAssetLabel};
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
@@ -39,6 +43,8 @@ use telemetry_anim::{
 use telemetry_model::{Freshness, Mode, Quat as TQuat, SpacecraftState};
 
 const MODEL: &str = "spacecraft.gltf";
+const VIEW_W: u32 = 1440;
+const VIEW_H: u32 = 640;
 const COLUMN_SPACING: f32 = 3.6;
 /// How long a mode pose takes to cross-fade in the blended column.
 const MODE_TRANSITION_S: f32 = 0.6;
@@ -179,6 +185,15 @@ struct Wiring {
     graphs_built: bool,
 }
 
+/// Offscreen colour target used for screenshots.
+///
+/// `Screenshot::primary_window` reads back the swapchain, and a macOS window
+/// that is not frontmost is not composited — so the capture succeeds and writes
+/// a solid black PNG. Rendering into an `Image` and capturing that bypasses the
+/// compositor entirely.
+#[derive(Resource)]
+struct CaptureTarget(Handle<Image>);
+
 /// Screenshot sequencing: wait for the scene, settle, capture, quit.
 #[derive(Resource)]
 struct Capture {
@@ -204,7 +219,7 @@ fn main() {
         .set(WindowPlugin {
             primary_window: Some(Window {
                 title: "cFS -> Bevy: three telemetry-to-animation mappings".into(),
-                resolution: WindowResolution::new(1440, 640),
+                resolution: WindowResolution::new(VIEW_W, VIEW_H),
                 ..default()
             }),
             ..default()
@@ -286,13 +301,42 @@ fn main() {
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct DriveSet;
 
-fn setup(mut commands: Commands, assets: Res<AssetServer>) {
+fn setup(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    args: Res<Args>,
+    mut images: ResMut<Assets<Image>>,
+) {
     commands.insert_resource(Model(assets.load(MODEL)));
 
-    commands.spawn((
-        Camera3d::default(),
-        Transform::from_xyz(0.0, 1.9, 7.4).looking_at(Vec3::new(0.0, 0.15, 0.0), Vec3::Y),
-    ));
+    let target = match args.screenshot {
+        Some(_) => {
+            let size = Extent3d { width: VIEW_W, height: VIEW_H, depth_or_array_layers: 1 };
+            let mut image = Image::new_fill(
+                size,
+                TextureDimension::D2,
+                &[0, 0, 0, 255],
+                TextureFormat::Bgra8UnormSrgb,
+                RenderAssetUsages::default(),
+            );
+            image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_DST
+                | TextureUsages::COPY_SRC
+                | TextureUsages::RENDER_ATTACHMENT;
+            let handle = images.add(image);
+            commands.insert_resource(CaptureTarget(handle.clone()));
+            RenderTarget::Image(handle.into())
+        }
+        None => RenderTarget::default(),
+    };
+
+    let camera = commands
+        .spawn((
+            Camera3d::default(),
+            target,
+            Transform::from_xyz(0.0, 1.9, 7.4).looking_at(Vec3::new(0.0, 0.15, 0.0), Vec3::Y),
+        ))
+        .id();
     commands.spawn((
         DirectionalLight { illuminance: 8_000.0, shadow_maps_enabled: true, ..default() },
         Transform::from_xyz(4.0, 8.0, 6.0).looking_at(Vec3::ZERO, Vec3::Y),
@@ -317,6 +361,7 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>) {
         ));
 
         commands.spawn((
+            UiTargetCamera(camera),
             Text::new(mapping.label()),
             TextFont { font_size: FontSize::Px(15.0), ..default() },
             TextColor(Color::srgb(0.75, 0.85, 1.0)),
@@ -331,6 +376,7 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>) {
 
     commands.spawn((
         Readout,
+        UiTargetCamera(camera),
         Text::new("waiting for telemetry"),
         TextFont { font_size: FontSize::Px(13.0), ..default() },
         TextColor(Color::srgb(0.55, 0.62, 0.7)),
@@ -797,6 +843,7 @@ fn update_readout(
 fn capture_when_ready(
     mut commands: Commands,
     mut capture: ResMut<Capture>,
+    target: Res<CaptureTarget>,
     timeline: Res<Timeline>,
     yokes: Query<(), With<Yoke>>,
     mut exit: MessageWriter<AppExit>,
@@ -815,7 +862,7 @@ fn capture_when_ready(
     }
     let path = capture.path.clone();
     println!("capturing {path}");
-    commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path));
+    commands.spawn(Screenshot::image(target.0.clone())).observe(save_to_disk(path));
     capture.shot = true;
     capture.settled_frames = 0;
 }

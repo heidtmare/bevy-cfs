@@ -19,6 +19,8 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod hk;
+pub mod sample_app;
 pub mod to_lab;
 
 use ccsds::{Error, PacketType, PrimaryHeader};

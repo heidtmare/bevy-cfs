@@ -25,6 +25,18 @@ pub const PRIMARY_HEADER_LEN: usize = 6;
 /// packet carries one octet of data.
 pub const MIN_PACKET_LEN: usize = PRIMARY_HEADER_LEN + 1;
 
+/// Octets of padding cFE puts between the telemetry secondary header and the
+/// application payload.
+///
+/// `CFE_MSG_TelemetryHeader_t` is `{ Msg, Sec, uint8 Spare[4] }` — the spare
+/// exists so a payload needing 64-bit alignment does not make the compiler
+/// insert padding of its own. It is **not** part of CCSDS and it is **not**
+/// present on command packets, whose header is just `{ Msg, Sec }`.
+///
+/// Verified against `option_inc/default_cfe_msg_hdr_pri.h` in v7.0.1 and
+/// against the committed capture, where every payload begins at octet 16.
+pub const CFE_TLM_SPARE_LEN: usize = 4;
+
 /// A borrowed, validated view over a complete space packet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SpacePacket<'a> {
@@ -102,6 +114,32 @@ impl<'a> SpacePacket<'a> {
                 PacketType::Telemetry => TlmSecondaryHeader::LEN,
             }
         };
+        self.data_field().get(skip..).ok_or(Error::Truncated {
+            need: PRIMARY_HEADER_LEN + skip,
+            got: self.bytes.len(),
+        })
+    }
+
+    /// The **cFE** application payload of a telemetry packet.
+    ///
+    /// [`SpacePacket::payload`] is CCSDS-correct: data field minus secondary
+    /// header. cFE puts [`CFE_TLM_SPARE_LEN`] octets of alignment padding after
+    /// the telemetry secondary header, so for real cFE telemetry it returns the
+    /// spare followed by the payload, and every field is four octets early.
+    ///
+    /// This matters more than an off-by-four usually does. Nothing rejects the
+    /// packet, no length check trips, and the decoded values are plausible
+    /// garbage rather than obvious garbage — which is exactly the failure mode
+    /// item 7 of the verification backlog was opened to catch. Use this
+    /// accessor for anything cFE emitted.
+    pub fn cfe_tlm_payload(&self) -> Result<&'a [u8], Error> {
+        if self.primary.packet_type != PacketType::Telemetry {
+            return Err(Error::WrongPacketType);
+        }
+        if !self.primary.secondary_header {
+            return Err(Error::NoSecondaryHeader);
+        }
+        let skip = TlmSecondaryHeader::LEN + CFE_TLM_SPARE_LEN;
         self.data_field().get(skip..).ok_or(Error::Truncated {
             need: PRIMARY_HEADER_LEN + skip,
             got: self.bytes.len(),

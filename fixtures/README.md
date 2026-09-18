@@ -15,9 +15,9 @@ Written by `tlm-capture`, read by `fake-cfs replay`.
 
 ## Recording
 
-Docker Desktop does not forward UDP from a container to the macOS host (see
-`docs/findings/0002`), so the capture runs *inside* the cFS container's network
-namespace, where `127.0.0.1` reaches both apps:
+Running *inside* the cFS container's network namespace, where `127.0.0.1`
+reaches both apps, needs no gateway address — which is why the committed capture
+was taken this way:
 
 ```sh
 docker run --rm --network=container:docker-cfs-1 \
@@ -27,11 +27,11 @@ docker run --rm --network=container:docker-cfs-1 \
     --seconds 12 --out fixtures/cfs-v7.0.1-hk.cfspkt
 ```
 
-On a Linux host, or any setup where the container is directly reachable, the
-plain form works:
+From the host it works too, as long as `--dest-ip` is this machine's address *as
+cFS sees it* — the IPv4 host gateway under Docker Desktop, not `127.0.0.1`:
 
 ```sh
-cargo run -p tlm-capture -- --dest-ip <host-as-cfs-sees-it> --seconds 10 --out fixtures/hk.cfspkt
+cargo run -p tlm-capture -- --dest-ip 192.168.65.254 --seconds 10 --out fixtures/hk.cfspkt
 ```
 
 ## Replaying
@@ -44,7 +44,16 @@ cargo run -p fake-cfs -- replay fixtures/hk.cfspkt --rate 10 --loop
 
 - `cfs-v7.0.1-hk.cfspkt` — 42 packets, 20 message IDs, from nasa/cFS v7.0.1
   (Draco, EDS disabled, linux/arm64). Backs the golden tests in
-  `crates/ccsds/tests/golden.rs`.
+  `crates/ccsds/tests/golden.rs` (headers) and
+  `crates/cfs-msg/tests/real_payloads.rs` (payloads, and the endianness proof).
+
+`demo.cfspkt` is *not* committed — it is synthetic, proves nothing, and is
+covered by the `.gitignore` rule below. Regenerate it whenever you want one:
+
+```sh
+cargo run -p fake-cfs -- serve --cmd-port 11234 --tlm-port 11235 --rate 20 &
+cargo run -p tlm-capture -- --cmd-port 11234 --tlm-port 11235 --seconds 5 --out fixtures/demo.cfspkt
+```
 
 ## What to commit
 

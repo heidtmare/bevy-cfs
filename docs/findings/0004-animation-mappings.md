@@ -163,3 +163,16 @@ confusing `E0599`. The general lesson: **a `no_std` claim that is never built
   timeline so a capture is reproducible, including stateful cross-fades.
 - Two open items unchanged from Phase 1: the command checksum (backlog item 6)
   and payload endianness against a real packet (item 7).
+
+## Amended in Phase 4
+
+The `--screenshot` command above had silently started producing solid black
+PNGs. `Screenshot::primary_window()` reads back the swapchain, and a macOS
+window that is not frontmost is not composited — so the capture succeeds and
+writes an empty image, with no error anywhere. Both this spike and `apps/viz`
+now render into an offscreen `Image` and capture that, which does not involve
+the compositor. See [0005](0005-vertical-slice.md).
+
+The measurement itself is unaffected: the committed images were taken while
+window capture still worked, and a fresh run reproduces `diff +5.29deg` at the
+same instant.

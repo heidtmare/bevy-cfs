@@ -15,7 +15,8 @@ use ccsds::{PacketType, PrimaryHeader, TlmSecondaryHeader};
 use cfs_link::LinkConfig;
 use cfs_msg::MsgIds;
 use telemetry_model::{
-    DEMO_PAYLOAD_LEN, Freshness, Mode, Quat, SpacecraftState, encode_demo_payload,
+    DEMO_PAYLOAD_LEN, DEMO_PAYLOAD_OFFSET, Freshness, Mode, Quat, SpacecraftState,
+    encode_demo_payload,
 };
 use bevy_cfs::{CfsPlugin, LinkHealth, Telemetry};
 
@@ -25,7 +26,7 @@ const SOLAR_RATE_DEG_S: f32 = 60.0;
 
 /// Build one demo telemetry packet stamped at `sim_time`.
 fn packet(seq: u16, sim_time: f64) -> Vec<u8> {
-    let total = 6 + TlmSecondaryHeader::LEN + DEMO_PAYLOAD_LEN;
+    let total = DEMO_PAYLOAD_OFFSET + DEMO_PAYLOAD_LEN;
     let mut pkt = vec![0u8; total];
 
     PrimaryHeader::for_total_len(
@@ -41,7 +42,11 @@ fn packet(seq: u16, sim_time: f64) -> Vec<u8> {
 
     let seconds = sim_time.trunc() as u32;
     let subseconds = (sim_time.fract() * 65536.0) as u16;
-    TlmSecondaryHeader { seconds, subseconds }.write(&mut pkt[6..12]).unwrap();
+    TlmSecondaryHeader { seconds, subseconds }
+        .write(&mut pkt[6..6 + TlmSecondaryHeader::LEN])
+        .unwrap();
+    // pkt[12..16]: the cFE telemetry-header spare, which cFE writes and the
+    // decoder must skip. See ccsds::CFE_TLM_SPARE_LEN.
 
     // Steady sweep: any stepping or snapping in playback shows up as a spike in
     // the per-frame delta.
@@ -54,7 +59,7 @@ fn packet(seq: u16, sim_time: f64) -> Vec<u8> {
     };
     let mut payload = [0u8; DEMO_PAYLOAD_LEN];
     encode_demo_payload(&state, &mut payload);
-    pkt[12..].copy_from_slice(&payload);
+    pkt[DEMO_PAYLOAD_OFFSET..].copy_from_slice(&payload);
     pkt
 }
 

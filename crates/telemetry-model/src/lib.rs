@@ -152,10 +152,26 @@ pub struct Sample {
 /// understands. Little-endian, matching a native x86/ARM cFS build's struct
 /// packing.
 ///
-/// This is a stand-in. Real payload layouts come from the mission's headers or
-/// from EDS, and confirming which endianness a given build emits is a Phase 1
-/// deliverable in its own right.
+/// This is a stand-in for a real mission's vehicle-dynamics packet; stock cFS
+/// publishes nothing like it. The *framing* around it is not a stand-in,
+/// though: it sits at [`DEMO_PAYLOAD_OFFSET`], behind a real
+/// `CFE_MSG_TelemetryHeader_t`, so a mapping bug in the offline path is the
+/// same bug it would be against live cFS.
+///
+/// Endianness is settled for the pinned build — little-endian, measured in
+/// `crates/cfs-msg/tests/real_payloads.rs` — but it is a property of the
+/// *target*, not of cFS, and a big-endian flight target would flip it.
 pub const DEMO_PAYLOAD_LEN: usize = 4 * 4 + 4 + 4 + 4 * 4 + 1;
+
+/// Octet at which a cFE telemetry payload begins: 6 primary + 6 timestamp + 4
+/// spare.
+///
+/// `fake-cfs` emits this padding even though nothing reads it, because a
+/// stand-in whose framing differs from the real thing trains the decoder on the
+/// wrong layout. That is not hypothetical — the four octets were missing here
+/// until the first real payload was decoded in Phase 4.
+pub const DEMO_PAYLOAD_OFFSET: usize =
+    ccsds::PRIMARY_HEADER_LEN + ccsds::TlmSecondaryHeader::LEN + ccsds::CFE_TLM_SPARE_LEN;
 
 /// Encode a state into the demo payload layout.
 ///
@@ -187,7 +203,9 @@ pub fn decode_demo(pkt: &SpacePacket<'_>, expected: MsgId) -> Option<Sample> {
         return None;
     }
     let time = pkt.tlm_secondary().ok()?.as_secs_f64();
-    let p = pkt.payload().ok()?;
+    // `cfe_tlm_payload`, not `payload`: cFE pads the telemetry header to 16
+    // octets. See `ccsds::CFE_TLM_SPARE_LEN`.
+    let p = pkt.cfe_tlm_payload().ok()?;
     if p.len() < DEMO_PAYLOAD_LEN {
         return None;
     }
@@ -244,6 +262,7 @@ mod tests {
     fn demo_payload_round_trips() {
         use ccsds::{PacketType, PrimaryHeader, SpacePacket, TlmSecondaryHeader};
 
+
         let state = SpacecraftState {
             attitude: Quat([0.1, 0.2, 0.3, 0.927]),
             solar_array_deg: 123.5,
@@ -254,14 +273,15 @@ mod tests {
         let mut payload = [0u8; DEMO_PAYLOAD_LEN];
         encode_demo_payload(&state, &mut payload);
 
-        let total = 6 + TlmSecondaryHeader::LEN + DEMO_PAYLOAD_LEN;
-        let mut pkt = [0u8; 6 + TlmSecondaryHeader::LEN + DEMO_PAYLOAD_LEN];
+        let total = DEMO_PAYLOAD_OFFSET + DEMO_PAYLOAD_LEN;
+        let mut pkt = [0u8; DEMO_PAYLOAD_OFFSET + DEMO_PAYLOAD_LEN];
         PrimaryHeader::for_total_len(0x083, PacketType::Telemetry, true, 5, total)
             .unwrap()
             .write(&mut pkt[..6])
             .unwrap();
         TlmSecondaryHeader { seconds: 1000, subseconds: 0x8000 }.write(&mut pkt[6..12]).unwrap();
-        pkt[12..].copy_from_slice(&payload);
+        // pkt[12..16] stays zero: the cFE alignment spare.
+        pkt[DEMO_PAYLOAD_OFFSET..].copy_from_slice(&payload);
 
         let parsed = SpacePacket::parse(&pkt).unwrap();
         let sample = decode_demo(&parsed, MsgId(0x0883)).expect("round trip");

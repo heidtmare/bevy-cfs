@@ -7,32 +7,46 @@ land.
 
 ## State
 
-**Phase 0 and Phase 2 gates met.** cFS v7.0.1 builds and runs in Docker, and 42 real packets
-across 20 message IDs have been captured and verified against the decoder with
-zero parse errors. The capture is committed as a fixture and backs the golden
-tests, so the codec is checked against real cFE bytes on every `cargo test`.
+**Phases 0-4 complete.** `apps/viz` runs against the containerized cFS v7.0.1,
+decodes real telemetry, animates it, and closes the command loop: a keypress
+becomes a real `SAMPLE_APP` no-op on the software bus, and the counter it
+increments comes back on the downlink and moves the model.
 
-Confirmed against the real build: message IDs, `to_lab` command code and payload,
-telemetry timestamp layout and epoch. Still open: the command checksum, and
-payload endianness — no payload field has been decoded from a real packet yet.
-See [docs/findings/](docs/findings/).
+![The slice against live cFS](docs/findings/images/viz-live-cfs.png)
 
-Phase 2 added the rate-mismatch layer: a jitter buffer that plays back two
+The verification backlog is closed. Confirmed against the real build: message
+IDs, `to_lab` command code and payload, timestamp layout and epoch, the command
+checksum algorithm, and payload endianness (**little-endian** for this target).
+
+Decoding the first real *payload* also found a four-octet offset bug that had
+survived three phases: `CFE_MSG_TelemetryHeader_t` carries an alignment spare, so
+cFE payloads start at octet **16**, not 12. Nothing errors when you get it wrong
+— you just get plausible garbage. See
+[0005](docs/findings/0005-vertical-slice.md).
+
+Phase 2's rate-mismatch layer holds: a jitter buffer that plays back two
 telemetry periods behind, interpolating between real samples and **never
 extrapolating** — past the newest sample it holds and reports staleness, because
 a display that keeps animating after telemetry stops is inventing data. Verified
 against induced packet loss, reordering and signal loss in
 [headless tests](crates/bevy_cfs/tests/headless.rs).
 
-One constraint worth knowing up front: **Docker Desktop does not forward UDP from
-a container to the macOS host**, so a native Bevy app cannot take live telemetry
-from the container without a relay. Development against `fake-cfs` and fixture
-replay is unaffected.
+Two things worth knowing up front:
+
+- **Stock cFS publishes no vehicle dynamics.** No attitude, no joint angles, no
+  wheel speeds — those come from a mission's own applications. The viz shows
+  `-- no source --` for the signals that do not exist rather than filling them
+  in, and names the real cFE field behind every one that does.
+- **`to_lab` needs this machine's IPv4 address as cFS sees it.** Under Docker
+  Desktop that is the host gateway (`--dest-ip 192.168.65.254`), never
+  `127.0.0.1` and never the IPv6 `host.docker.internal`. An earlier finding
+  concluded Docker Desktop blocks container→host UDP; it does not, and 0005
+  records how that mistake was made.
 
 | Crate | Purpose | std |
 |---|---|---|
 | [crates/ccsds](crates/ccsds) | CCSDS space packet codec, zero-copy | no_std |
-| [crates/cfs-msg](crates/cfs-msg) | cFE message IDs, `to_lab` commands | no_std |
+| [crates/cfs-msg](crates/cfs-msg) | cFE message IDs, lab commands, real housekeeping payloads | no_std |
 | [crates/telemetry-model](crates/telemetry-model) | Decoded telemetry as domain state + interpolation | no_std |
 | [crates/telemetry-anim](crates/telemetry-anim) | Telemetry→animation mapping maths, no Bevy | no_std |
 | [crates/cfs-link](crates/cfs-link) | UDP transport, handshake, link health | std |
@@ -41,13 +55,38 @@ replay is unaffected.
 | [tools/tlm-capture](tools/tlm-capture) | Record real telemetry to a fixture | std |
 | [tools/gltf-gen](tools/gltf-gen) | Generates `assets/spacecraft.gltf` — the rig is source code | std |
 | [spikes/anim-mappings](spikes/anim-mappings) | Phase 3: three animation mappings, side by side | std |
+| [apps/viz](apps/viz) | Phase 4: the vertical slice — live cFS in, commands out | std |
 
 The four `no_std` crates must never gain a Bevy dependency: they are what gets
 reused on the flight side if Architecture B goes ahead.
 
 `bevy_cfs` takes `bevy` with `default-features = false` — ECS and time, no
-renderer — so the workspace tests headlessly without a GPU. `spikes/anim-mappings`
-is the one crate allowed to want a GPU. `apps/viz` joins in Phase 4.
+renderer — so the workspace tests headlessly without a GPU. `apps/viz` and
+`spikes/anim-mappings` are the only crates allowed to want one.
+
+## Run the vertical slice
+
+```sh
+docker compose -f docker/compose.yaml up -d --build          # cFS in a container
+cargo run -p viz -- --dest-ip 192.168.65.254                 # the host, as cFS sees it
+```
+
+Press **N** to send a `SAMPLE_APP` no-op and **R** to reset its counters. The
+panel shows the round trip: the command goes out over UDP 1234, `sample_app`
+increments `CommandCounter` on the flight side, and the next housekeeping packet
+brings it back — typically 1-5 s later, because the cadence is a scheduler tick,
+not network latency.
+
+Without a container:
+
+```sh
+cargo run -p fake-cfs -- serve --cmd-port 11234 --tlm-port 11235 --rate 8
+cargo run -p viz -- --cmd-port 11234 --tlm-port 11235
+cargo run -p viz -- --offline                                 # no socket at all
+```
+
+`--noop-every SECONDS` drives the command path on a timer, for recordings.
+Findings: [docs/findings/0005-vertical-slice.md](docs/findings/0005-vertical-slice.md).
 
 ## See the three animation mappings
 
@@ -112,6 +151,8 @@ the compose file.
 cargo test --workspace
 
 # the no_std crates, actually built no_std — see finding 0004
+cargo check -p ccsds          --no-default-features
+cargo check -p cfs-msg        --no-default-features
 cargo check -p telemetry-model --no-default-features --features libm
 cargo check -p telemetry-anim  --no-default-features --features libm
 ```
@@ -120,11 +161,12 @@ No network, no cFS, no container required.
 
 ## Next
 
-1. **Phase 4, the vertical slice:** `apps/viz` — the rig driven live by the
-   containerized cFS, a telemetry side panel, a staleness indicator, and one
-   **command** path back to `ci_lab` to prove the loop closes. Phase 3's table
-   says which mapping each signal gets; Phase 4 wires them to real packets.
-2. Decode a real payload — settles the last substantive item in the
-   [verification backlog](docs/findings/0001-verification-backlog.md).
-3. Try the `native_eds` build configuration, which is how the "generate Rust
-   types from EDS rather than hand-writing them" question gets answered.
+1. **Try the `native_eds` build configuration.** Now the highest-leverage
+   remaining question: it decides whether flight and ground types can share one
+   source of truth instead of drifting. Expect different message IDs — the golden
+   tests are the tripwire.
+2. **Phase 5, Architecture B:** `spikes/rust-cfs-app` — a Rust cFS application
+   loaded by cFE ES. Time-boxed hard; a negative verdict is a legitimate result.
+3. Command authentication. `ci_lab` accepts any well-formed datagram on UDP 1234
+   with checksum validation switched off, which is fine for a lab build and worth
+   saying out loud before anyone points this at something that matters.
