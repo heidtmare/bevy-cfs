@@ -1,0 +1,14 @@
+[package]
+name = "cfs-msg"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "cFE message IDs and lab-application message definitions."
+
+[dependencies]
+ccsds = { workspace = true }
+
+[features]
+default = ["std"]
+std = ["ccsds/std"]

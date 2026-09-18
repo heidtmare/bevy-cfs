@@ -1,0 +1,15 @@
+[package]
+name = "telemetry-model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Decoded cFS telemetry as domain state, independent of any renderer."
+
+[dependencies]
+ccsds = { workspace = true }
+cfs-msg = { workspace = true }
+
+[features]
+default = ["std"]
+std = ["ccsds/std", "cfs-msg/std"]

@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/ccsds",
+    "crates/cfs-msg",
+    "crates/cfs-link",
+    "crates/telemetry-model",
+    "tools/fake-cfs",
+    "tools/tlm-capture",
+]
+# NOTE: crates/bevy_cfs and apps/viz join the workspace in Phase 2, once the Bevy
+# release is pinned. Keeping them out until then means `cargo test` on the core
+# codec never waits on a Bevy build.
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+# Path deps declare default-features = false so that no_std members can use them
+# as-is; std consumers opt in with features = ["std"].
+ccsds = { path = "crates/ccsds", default-features = false }
+cfs-msg = { path = "crates/cfs-msg", default-features = false }
+cfs-link = { path = "crates/cfs-link" }
+telemetry-model = { path = "crates/telemetry-model", default-features = false }

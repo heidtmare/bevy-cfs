@@ -1,0 +1,11 @@
+[package]
+name = "ccsds"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "CCSDS Space Packet Protocol encoding/decoding, no_std, zero-copy."
+
+[features]
+default = ["std"]
+std = []

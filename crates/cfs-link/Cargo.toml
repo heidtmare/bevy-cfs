@@ -1,0 +1,11 @@
+[package]
+name = "cfs-link"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "UDP transport to the cFS lab command-ingest and telemetry-output apps."
+
+[dependencies]
+ccsds = { workspace = true, features = ["std"] }
+cfs-msg = { workspace = true, features = ["std"] }

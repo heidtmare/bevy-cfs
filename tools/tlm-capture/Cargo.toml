@@ -1,0 +1,12 @@
+[package]
+name = "tlm-capture"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Enable cFS telemetry output and record raw packets to a fixture file."
+
+[dependencies]
+ccsds = { workspace = true, features = ["std"] }
+cfs-msg = { workspace = true, features = ["std"] }
+cfs-link = { workspace = true }

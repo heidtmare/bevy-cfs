@@ -1,0 +1,4 @@
+/target
+/fixtures/*.cfspkt
+!/fixtures/README.md
+.DS_Store

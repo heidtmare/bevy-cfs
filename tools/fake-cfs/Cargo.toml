@@ -1,0 +1,12 @@
+[package]
+name = "fake-cfs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Stand-in for a running cFS instance: synthetic telemetry and fixture replay."
+
+[dependencies]
+ccsds = { workspace = true, features = ["std"] }
+cfs-msg = { workspace = true, features = ["std"] }
+telemetry-model = { workspace = true, features = ["std"] }
