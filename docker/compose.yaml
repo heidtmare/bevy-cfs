@@ -4,15 +4,30 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        # TODO(phase-0): pin to a release tag, not `main`.
-        CFS_REF: main
-    # cFS is built for x86_64; on Apple Silicon this runs under emulation, which
-    # is slow to build but fine to run at lab telemetry rates.
-    platform: linux/amd64
+        # Pinned: see docs/findings/0002. Changing this invalidates every
+        # captured fixture and every message ID in the config.
+        CFS_REF: v7.0.1
+    # Built for the host architecture. On Apple Silicon that is native arm64,
+    # which builds several times faster than emulated x86_64. cFS is portable C
+    # and OSAL supports aarch64 Linux; if a build or runtime problem turns out to
+    # be architecture-specific, uncomment the pin below to fall back to emulation.
+    # platform: linux/amd64
     ports:
       # ci_lab command ingest. Telemetry is *outbound* from the container to
       # whatever address the enable-output command names, so it needs no mapping.
       - "1234:1234/udp"
+    sysctls:
+      # cFE creates one POSIX message queue per software-bus pipe, and asks for
+      # depths and message sizes well above a container's defaults (msg_max=10,
+      # msgsize_max=8192). Without these, OS_QueueCreate fails with EINVAL, ES
+      # and EVS cannot create their pipes, and cFE processor-resets in a loop.
+      #
+      # These are IPC-namespaced, so Docker sets them per container. Raising them
+      # on the host instead would work but is not reproducible for anyone else.
+      # Running as root does not help: bypassing msg_max needs CAP_SYS_RESOURCE,
+      # which is not in Docker's default capability set.
+      fs.mqueue.msg_max: "1024"
+      fs.mqueue.msgsize_max: "65536"
     extra_hosts:
       # Lets anything inside the container address the host as
       # host.docker.internal, including to_lab's telemetry destination.

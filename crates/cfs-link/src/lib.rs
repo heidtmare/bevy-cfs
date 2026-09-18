@@ -24,8 +24,19 @@ use cfs_msg::{MsgIds, to_lab};
 
 /// Default `ci_lab` command port.
 pub const DEFAULT_CMD_PORT: u16 = 1234;
+
 /// Default `to_lab` telemetry port.
-pub const DEFAULT_TLM_PORT: u16 = 1235;
+///
+/// 2234, not the 1235 that older cFS documentation and ground tools use.
+/// `to_lab` computes its destination port as
+/// `TO_LAB_MISSION_TLM_PORT + CFE_PSP_GetProcessorId() - 1`, and the mission
+/// default moved to 2234; cpu1 therefore emits on 2234.
+///
+/// This cost an hour of debugging a link that looked completely dead while
+/// `to_lab` was cheerfully logging "telemetry output enabled" — the enable
+/// command had worked all along. Verified by packet capture against v7.0.1;
+/// see docs/findings/0002.
+pub const DEFAULT_TLM_PORT: u16 = 2234;
 
 /// Largest datagram accepted. cFE's own limit is a mission config; this is
 /// generous enough to catch oversize packets as an error rather than truncating

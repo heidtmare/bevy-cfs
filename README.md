@@ -7,9 +7,20 @@ land.
 
 ## State
 
-Phase 0/1 scaffolding is in place and tested. No cFS instance has been built
-yet — Docker was not running on this machine — so everything so far is exercised
-against `fake-cfs` rather than the real thing.
+**Phase 0 gate met.** cFS v7.0.1 builds and runs in Docker, and 42 real packets
+across 20 message IDs have been captured and verified against the decoder with
+zero parse errors. The capture is committed as a fixture and backs the golden
+tests, so the codec is checked against real cFE bytes on every `cargo test`.
+
+Confirmed against the real build: message IDs, `to_lab` command code and payload,
+telemetry timestamp layout and epoch. Still open: the command checksum, and
+payload endianness — no payload field has been decoded from a real packet yet.
+See [docs/findings/](docs/findings/).
+
+One constraint worth knowing up front: **Docker Desktop does not forward UDP from
+a container to the macOS host**, so a native Bevy app cannot take live telemetry
+from the container without a relay. Development against `fake-cfs` and fixture
+replay is unaffected.
 
 | Crate | Purpose | std |
 |---|---|---|
@@ -43,8 +54,13 @@ exactly as `to_lab` does, so this exercises the real handshake.
 
 ## With cFS
 
-See [docker/README.md](docker/README.md). The container setup is written but
-**unverified** — Docker was unavailable.
+```sh
+docker compose -f docker/compose.yaml up -d --build
+```
+
+See [docker/README.md](docker/README.md) for ports (telemetry is on **2234**, not
+the 1235 in older docs), capturing fixtures, and the gotchas already encoded in
+the compose file.
 
 ## Tests
 
@@ -56,8 +72,9 @@ No network, no cFS, no container required.
 
 ## Next
 
-1. Build the cFS container and capture real packets (Phase 0 gate).
-2. Work through [docs/findings/0001-verification-backlog.md](docs/findings/0001-verification-backlog.md) —
-   every assumption currently baked into the decoder, in the order it will bite.
-3. Pin Bevy, add `crates/bevy_cfs`, build the jitter buffer and interpolation
+1. Pin Bevy, add `crates/bevy_cfs`, and build the jitter buffer and interpolation
    against `fake-cfs` (Phase 2).
+2. Decode a real payload — settles the last substantive item in the
+   [verification backlog](docs/findings/0001-verification-backlog.md).
+3. Try the `native_eds` build configuration, which is how the "generate Rust
+   types from EDS rather than hand-writing them" question gets answered.
