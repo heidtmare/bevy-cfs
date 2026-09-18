@@ -116,6 +116,11 @@ Separate crates so the flight-agnostic parts stay testable and `no_std`-friendly
 **Gate:** plugin driven purely by `fake-cfs` produces smooth motion; induced packet loss and
 out-of-order delivery degrade gracefully.
 
+> **Done** — see `docs/findings/0003`. Bevy pinned at 0.19.1. The buffer, interpolation and clock
+> resync live in `telemetry-model` (Bevy-free, 13 unit tests); `bevy_cfs` is a thin adapter taking
+> `bevy` with `default-features = false`, so the workspace tests headlessly. Two real bugs surfaced,
+> both about misbehaving links rather than the happy path.
+
 ---
 
 ## 6. Phase 3 — The animation question itself (1 week)

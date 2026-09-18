@@ -1,0 +1,17 @@
+[package]
+name = "bevy_cfs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Bevy plugin driving scene state from live cFS telemetry."
+
+[dependencies]
+# No default features: this crate is ECS and time only. It must stay headless so
+# it runs in CI without a GPU, and so the rendering choices live in apps/viz.
+bevy = { version = "0.19", default-features = false }
+
+ccsds = { workspace = true, features = ["std"] }
+cfs-msg = { workspace = true, features = ["std"] }
+cfs-link = { workspace = true }
+telemetry-model = { workspace = true, features = ["std"] }

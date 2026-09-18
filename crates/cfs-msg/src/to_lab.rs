@@ -49,7 +49,7 @@ pub fn enable_output<'a>(
 
 /// Build a no-op command. Useful as a liveness probe: `to_lab` answers with an
 /// event message, which proves the command path works before any telemetry flows.
-pub fn noop<'a>(out: &'a mut [u8], to_lab_cmd: MsgId, seq_count: u16) -> Result<&'a [u8], Error> {
+pub fn noop(out: &mut [u8], to_lab_cmd: MsgId, seq_count: u16) -> Result<&[u8], Error> {
     build_command(out, to_lab_cmd, NOOP_CC, seq_count, &[])
 }
 

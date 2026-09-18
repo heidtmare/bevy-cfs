@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/bevy_cfs",
     "crates/ccsds",
     "crates/cfs-msg",
     "crates/cfs-link",
@@ -25,3 +26,4 @@ ccsds = { path = "crates/ccsds", default-features = false }
 cfs-msg = { path = "crates/cfs-msg", default-features = false }
 cfs-link = { path = "crates/cfs-link" }
 telemetry-model = { path = "crates/telemetry-model", default-features = false }
+bevy_cfs = { path = "crates/bevy_cfs" }

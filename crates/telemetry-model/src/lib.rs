@@ -12,6 +12,12 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+extern crate alloc;
+
+pub mod buffer;
+
+pub use buffer::{BufferConfig, BufferStats, Freshness, JitterBuffer};
+
 use ccsds::SpacePacket;
 use cfs_msg::MsgId;
 
@@ -105,8 +111,10 @@ impl SpacecraftState {
     pub fn lerp(self, other: Self, t: f32) -> Self {
         let t = t.clamp(0.0, 1.0);
         let mut wheel_rpm = [0.0f32; 4];
-        for i in 0..4 {
-            wheel_rpm[i] = self.wheel_rpm[i] + (other.wheel_rpm[i] - self.wheel_rpm[i]) * t;
+        for (out, (a, b)) in
+            wheel_rpm.iter_mut().zip(self.wheel_rpm.iter().zip(other.wheel_rpm.iter()))
+        {
+            *out = a + (b - a) * t;
         }
         Self {
             attitude: self.attitude.nlerp(other.attitude, t),
@@ -147,6 +155,26 @@ pub struct Sample {
 /// from EDS, and confirming which endianness a given build emits is a Phase 1
 /// deliverable in its own right.
 pub const DEMO_PAYLOAD_LEN: usize = 4 * 4 + 4 + 4 + 4 * 4 + 1;
+
+/// Encode a state into the demo payload layout.
+///
+/// The exact inverse of [`decode_demo`]'s payload half. Shared by `fake-cfs` and
+/// the tests so a layout change cannot silently desynchronize the generator from
+/// the decoder — the round-trip test below fails instead.
+pub fn encode_demo_payload(state: &SpacecraftState, out: &mut [u8; DEMO_PAYLOAD_LEN]) {
+    let put = |out: &mut [u8; DEMO_PAYLOAD_LEN], off: usize, v: f32| {
+        out[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    };
+    for (i, v) in state.attitude.0.iter().enumerate() {
+        put(out, i * 4, *v);
+    }
+    put(out, 16, state.solar_array_deg);
+    put(out, 20, state.deploy_progress);
+    for (i, rpm) in state.wheel_rpm.iter().enumerate() {
+        put(out, 24 + i * 4, *rpm);
+    }
+    out[40] = state.mode as u8;
+}
 
 /// Decode a demo telemetry packet into a [`Sample`].
 ///
@@ -209,6 +237,36 @@ mod tests {
     fn angles_wrap_the_short_way() {
         assert!((lerp_angle_deg(359.0, 1.0, 0.5) - 360.0).abs() < 1e-3);
         assert!((lerp_angle_deg(10.0, 20.0, 0.5) - 15.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn demo_payload_round_trips() {
+        use ccsds::{PacketType, PrimaryHeader, SpacePacket, TlmSecondaryHeader};
+
+        let state = SpacecraftState {
+            attitude: Quat([0.1, 0.2, 0.3, 0.927]),
+            solar_array_deg: 123.5,
+            deploy_progress: 0.75,
+            wheel_rpm: [1000.0, -250.5, 0.0, 42.25],
+            mode: Mode::Deploying,
+        };
+        let mut payload = [0u8; DEMO_PAYLOAD_LEN];
+        encode_demo_payload(&state, &mut payload);
+
+        let total = 6 + TlmSecondaryHeader::LEN + DEMO_PAYLOAD_LEN;
+        let mut pkt = [0u8; 6 + TlmSecondaryHeader::LEN + DEMO_PAYLOAD_LEN];
+        PrimaryHeader::for_total_len(0x083, PacketType::Telemetry, true, 5, total)
+            .unwrap()
+            .write(&mut pkt[..6])
+            .unwrap();
+        TlmSecondaryHeader { seconds: 1000, subseconds: 0x8000 }.write(&mut pkt[6..12]).unwrap();
+        pkt[12..].copy_from_slice(&payload);
+
+        let parsed = SpacePacket::parse(&pkt).unwrap();
+        let sample = decode_demo(&parsed, MsgId(0x0883)).expect("round trip");
+        assert_eq!(sample.state, state);
+        assert!((sample.time - 1000.5).abs() < 1e-9);
+        assert_eq!(sample.seq_count, 5);
     }
 
     #[test]

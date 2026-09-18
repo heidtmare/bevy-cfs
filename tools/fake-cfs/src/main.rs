@@ -19,7 +19,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ccsds::{PacketType, PrimaryHeader, TlmSecondaryHeader};
 use cfs_msg::{MsgIds, to_lab};
-use telemetry_model::{DEMO_PAYLOAD_LEN, Mode};
+use telemetry_model::{
+    DEMO_PAYLOAD_LEN, Mode, Quat, SpacecraftState, encode_demo_payload,
+};
 
 const USAGE: &str = "\
 fake-cfs — stand-in cFS telemetry source
@@ -161,17 +163,21 @@ fn build_demo_packet(seq: &mut u16, t: f64) -> Vec<u8> {
         Mode::Deployed
     };
 
-    let p = &mut pkt[12..];
-    for (i, v) in q.iter().enumerate() {
-        p[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+    let mut wheel_rpm = [0.0f32; 4];
+    for (i, rpm) in wheel_rpm.iter_mut().enumerate() {
+        *rpm = (1000.0 + 200.0 * (t * 0.5 + i as f64).sin()) as f32;
     }
-    p[16..20].copy_from_slice(&solar_array_deg.to_le_bytes());
-    p[20..24].copy_from_slice(&deploy.to_le_bytes());
-    for i in 0..4 {
-        let rpm = (1000.0 + 200.0 * (t * 0.5 + i as f64).sin()) as f32;
-        p[24 + i * 4..28 + i * 4].copy_from_slice(&rpm.to_le_bytes());
-    }
-    p[40] = mode as u8;
+    let state = SpacecraftState {
+        attitude: Quat(q),
+        solar_array_deg,
+        deploy_progress: deploy,
+        wheel_rpm,
+        mode,
+    };
+
+    let mut payload = [0u8; DEMO_PAYLOAD_LEN];
+    encode_demo_payload(&state, &mut payload);
+    pkt[12..].copy_from_slice(&payload);
 
     pkt
 }

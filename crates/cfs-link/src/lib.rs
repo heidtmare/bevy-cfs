@@ -122,7 +122,11 @@ impl RawPacket {
 
 /// A live connection to cFS.
 pub struct CfsLink {
-    rx: Receiver<RawPacket>,
+    // Mutex because `Receiver` is `Send` but not `Sync`, and a Bevy `Resource`
+    // must be both. Draining is the only use, it happens once per frame from one
+    // system, and the lock is never held across a blocking call — so the cost is
+    // an uncontended lock per frame.
+    rx: Mutex<Receiver<RawPacket>>,
     cmd_socket: UdpSocket,
     cmd_addr: SocketAddr,
     seq_count: Mutex<u16>,
@@ -205,7 +209,7 @@ impl CfsLink {
         }
 
         let link = Self {
-            rx,
+            rx: Mutex::new(rx),
             cmd_socket,
             cmd_addr: config.cmd_addr,
             seq_count: Mutex::new(0),
@@ -270,10 +274,25 @@ impl CfsLink {
         *guard
     }
 
-    /// Drain everything received since the last call. Never blocks — this is
-    /// what a Bevy system calls once per frame.
-    pub fn drain(&self) -> impl Iterator<Item = RawPacket> + '_ {
-        self.rx.try_iter()
+    /// Drain everything received since the last call into `out`, returning how
+    /// many were appended. Never blocks.
+    ///
+    /// Takes a buffer rather than returning one so a caller on a frame budget can
+    /// reuse an allocation (in Bevy, a `Local<Vec<RawPacket>>`).
+    pub fn drain_into(&self, out: &mut Vec<RawPacket>) -> usize {
+        let rx = self.rx.lock().unwrap_or_else(|e| e.into_inner());
+        let before = out.len();
+        out.extend(rx.try_iter());
+        out.len() - before
+    }
+
+    /// Drain everything received since the last call. Never blocks.
+    ///
+    /// Allocates; prefer [`CfsLink::drain_into`] on a per-frame path.
+    pub fn drain(&self) -> Vec<RawPacket> {
+        let mut out = Vec::new();
+        self.drain_into(&mut out);
+        out
     }
 
     pub fn stats(&self) -> &Arc<LinkStats> {
@@ -295,6 +314,13 @@ impl Drop for CfsLink {
 mod tests {
     use super::*;
     use cfs_msg::MsgId;
+
+    /// `CfsLink` must stay `Send + Sync` to be usable as a Bevy resource. This
+    /// fails at compile time if a future field breaks that.
+    const _: fn() = || {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<CfsLink>();
+    };
 
     /// End-to-end over the loopback: a fake `ci_lab` receives the enable-output
     /// command the link sends on connect, then answers with telemetry that the
@@ -333,7 +359,7 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let got = loop {
-            if let Some(p) = link.drain().next() {
+            if let Some(p) = link.drain().into_iter().next() {
                 break p;
             }
             assert!(Instant::now() < deadline, "no telemetry delivered");
@@ -365,6 +391,6 @@ mod tests {
             assert!(Instant::now() < deadline, "parse error never counted");
             thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(link.drain().count(), 0);
+        assert_eq!(link.drain().len(), 0);
     }
 }
