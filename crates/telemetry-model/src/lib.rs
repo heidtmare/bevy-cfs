@@ -15,6 +15,7 @@
 extern crate alloc;
 
 pub mod buffer;
+pub(crate) mod math;
 
 pub use buffer::{BufferConfig, BufferStats, Freshness, JitterBuffer};
 
@@ -44,7 +45,7 @@ impl Quat {
         for i in 0..4 {
             out[i] = self.0[i] + (b[i] - self.0[i]) * t;
         }
-        let norm = out.iter().map(|v| v * v).sum::<f32>().sqrt();
+        let norm = math::sqrtf(out.iter().map(|v| v * v).sum::<f32>());
         if norm > f32::EPSILON {
             for v in &mut out {
                 *v /= norm;

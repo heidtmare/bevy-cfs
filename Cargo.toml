@@ -6,12 +6,15 @@ members = [
     "crates/cfs-msg",
     "crates/cfs-link",
     "crates/telemetry-model",
+    "crates/telemetry-anim",
     "tools/fake-cfs",
     "tools/tlm-capture",
+    "tools/gltf-gen",
+    "spikes/anim-mappings",
 ]
-# NOTE: crates/bevy_cfs and apps/viz join the workspace in Phase 2, once the Bevy
-# release is pinned. Keeping them out until then means `cargo test` on the core
-# codec never waits on a Bevy build.
+# NOTE: only spikes/anim-mappings pulls a renderer. Everything else builds and
+# tests without a GPU, which is what keeps `cargo test --workspace` usable in CI.
+# apps/viz joins in Phase 4.
 
 [workspace.package]
 version = "0.1.0"
@@ -26,4 +29,5 @@ ccsds = { path = "crates/ccsds", default-features = false }
 cfs-msg = { path = "crates/cfs-msg", default-features = false }
 cfs-link = { path = "crates/cfs-link" }
 telemetry-model = { path = "crates/telemetry-model", default-features = false }
+telemetry-anim = { path = "crates/telemetry-anim", default-features = false }
 bevy_cfs = { path = "crates/bevy_cfs" }

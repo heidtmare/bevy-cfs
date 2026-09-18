@@ -225,12 +225,13 @@ impl JitterBuffer {
     fn resync_if_adrift(&mut self, arrival: f64) {
         let Some(playback) = self.playback else { return };
         let target = arrival - self.config.delay;
-        if (target - playback).abs() > self.config.resync_threshold {
+        if crate::math::abs(target - playback) > self.config.resync_threshold {
             self.playback = Some(target);
             self.stats.resyncs += 1;
             // Samples from before the jump describe a different timeline and
             // would otherwise bracket the playback instant with nonsense.
-            self.samples.retain(|s| (s.time - arrival).abs() <= self.config.resync_threshold);
+            self.samples
+                .retain(|s| crate::math::abs(s.time - arrival) <= self.config.resync_threshold);
         }
     }
 

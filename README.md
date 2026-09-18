@@ -34,17 +34,43 @@ replay is unaffected.
 | [crates/ccsds](crates/ccsds) | CCSDS space packet codec, zero-copy | no_std |
 | [crates/cfs-msg](crates/cfs-msg) | cFE message IDs, `to_lab` commands | no_std |
 | [crates/telemetry-model](crates/telemetry-model) | Decoded telemetry as domain state + interpolation | no_std |
+| [crates/telemetry-anim](crates/telemetry-anim) | Telemetry→animation mapping maths, no Bevy | no_std |
 | [crates/cfs-link](crates/cfs-link) | UDP transport, handshake, link health | std |
 | [crates/bevy_cfs](crates/bevy_cfs) | Bevy plugin: resources, systems, playback | std |
 | [tools/fake-cfs](tools/fake-cfs) | Synthetic cFS: telemetry generator and fixture replayer | std |
 | [tools/tlm-capture](tools/tlm-capture) | Record real telemetry to a fixture | std |
+| [tools/gltf-gen](tools/gltf-gen) | Generates `assets/spacecraft.gltf` — the rig is source code | std |
+| [spikes/anim-mappings](spikes/anim-mappings) | Phase 3: three animation mappings, side by side | std |
 
-The three `no_std` crates must never gain a Bevy dependency: they are what gets
+The four `no_std` crates must never gain a Bevy dependency: they are what gets
 reused on the flight side if Architecture B goes ahead.
 
 `bevy_cfs` takes `bevy` with `default-features = false` — ECS and time, no
-renderer — so the whole workspace tests headlessly without a GPU. `apps/viz`
-joins in Phase 4 and brings the rendering.
+renderer — so the workspace tests headlessly without a GPU. `spikes/anim-mappings`
+is the one crate allowed to want a GPU. `apps/viz` joins in Phase 4.
+
+## See the three animation mappings
+
+```sh
+cargo run -p gltf-gen                  # regenerate the rig (checked in, but reproducible)
+cargo run -p anim-mappings             # synthetic telemetry
+cargo run -p anim-mappings -- --live   # against fake-cfs or a running cFS
+```
+
+Three copies of the same spacecraft, reading the same telemetry in the same
+frame, differing in exactly one mechanism between adjacent columns: direct
+transform drive, clip-seek, and `AnimationGraph` blending. The readout prints
+the inner hinge angle as computed by direct drive *and* as read back from the
+clip-driven `Transform`, so the divergence between the two is on screen.
+
+Screenshots are deterministic — the timeline steps at a fixed rate, so stateful
+cross-fades reproduce exactly:
+
+```sh
+cargo run -p anim-mappings -- --screenshot out.png --at 2.15   # mid mode-transition
+```
+
+Findings: [docs/findings/0004-animation-mappings.md](docs/findings/0004-animation-mappings.md).
 
 ## Watch it animate, without cFS
 
@@ -84,16 +110,20 @@ the compose file.
 
 ```sh
 cargo test --workspace
+
+# the no_std crates, actually built no_std — see finding 0004
+cargo check -p telemetry-model --no-default-features --features libm
+cargo check -p telemetry-anim  --no-default-features --features libm
 ```
 
 No network, no cFS, no container required.
 
 ## Next
 
-1. **Phase 3, the actual research question:** how telemetry should map onto
-   Bevy's animation system — direct `Transform` drive, clip-as-lookup-table, or
-   `AnimationGraph` blending. All three consume the same `SpacecraftState`, which
-   is what keeps the comparison fair.
+1. **Phase 4, the vertical slice:** `apps/viz` — the rig driven live by the
+   containerized cFS, a telemetry side panel, a staleness indicator, and one
+   **command** path back to `ci_lab` to prove the loop closes. Phase 3's table
+   says which mapping each signal gets; Phase 4 wires them to real packets.
 2. Decode a real payload — settles the last substantive item in the
    [verification backlog](docs/findings/0001-verification-backlog.md).
 3. Try the `native_eds` build configuration, which is how the "generate Rust

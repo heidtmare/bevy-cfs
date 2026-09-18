@@ -131,7 +131,8 @@ mappings on the same glTF model and write up which fits which kind of signal:
 1. **Direct transform drive** — telemetry writes `Transform` each frame; `AnimationPlayer` unused.
    Right for continuous physical state (attitude, gimbal angle, solar array rotation). Simple and
    exact.
-2. **Clip-as-lookup-table** — author a clip in Blender for a mechanism's full travel, then *seek*
+2. **Clip-as-lookup-table** — author a clip for a mechanism's full travel (Blender in a real
+   pipeline; here `tools/gltf-gen` emits an equivalent staged, eased clip), then *seek*
    the active animation to `normalized_telemetry * clip_duration` instead of letting it play.
    Right for rigged multi-part mechanisms (deployment arms, latches, docking hardware) where an
    artist owns the motion and telemetry owns only the parameter.
@@ -143,6 +144,15 @@ visibility for fault indicators) via custom animatable properties, since spacecr
 mostly *not* rigid-body motion.
 
 **Gate:** a written recommendation table — signal type → mapping — backed by the running demo.
+
+> **Done.** See [docs/findings/0004-animation-mappings.md](docs/findings/0004-animation-mappings.md).
+> The answer is that there is no single answer: a real rig mixes all three, and the useful output is
+> the signal-type table rather than a winner. Direct drive and clip seek were given every constant in
+> common — `telemetry-anim` owns the rig and the easing curve, and `gltf-gen` bakes the keyframes from
+> it — and still diverge by **5.29°** mid-travel, because a sparse clip is a sampling of a curve and
+> not the curve. Confirmed twice, in angle space and from the `Transform` Bevy wrote, agreeing to
+> 0.01°. Also surfaced: `telemetry-model` claimed `no_std` but had never been built without `std`.
+> The model is generated (`cargo run -p gltf-gen`), not an opaque `.glb`, so the rig is reviewable.
 
 ---
 

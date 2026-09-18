@@ -9,7 +9,11 @@ description = "Decoded cFS telemetry as domain state, independent of any rendere
 [dependencies]
 ccsds = { workspace = true }
 cfs-msg = { workspace = true }
+# Only linked by no_std builds; `std` uses the intrinsics instead.
+libm = { version = "0.2", optional = true }
 
 [features]
 default = ["std"]
 std = ["ccsds/std", "cfs-msg/std"]
+# For no_std consumers: supplies sqrt. See src/math.rs.
+libm = ["dep:libm"]

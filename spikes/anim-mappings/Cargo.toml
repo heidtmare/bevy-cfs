@@ -1,0 +1,19 @@
+[package]
+name = "anim-mappings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Phase 3 spike: three ways to drive Bevy animation from the same telemetry."
+
+[dependencies]
+# Full default features here on purpose. This is the one crate in the workspace
+# allowed to want a GPU; everything it depends on stays headless.
+bevy = "0.19"
+
+bevy_cfs = { workspace = true }
+telemetry-anim = { workspace = true, features = ["std"] }
+telemetry-model = { workspace = true, features = ["std"] }
+cfs-link = { workspace = true }
+cfs-msg = { workspace = true, features = ["std"] }

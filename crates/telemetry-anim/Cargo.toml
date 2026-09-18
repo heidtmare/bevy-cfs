@@ -1,0 +1,15 @@
+[package]
+name = "telemetry-anim"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Telemetry-to-animation mapping maths. No Bevy, no rendering."
+
+[dependencies]
+telemetry-model = { workspace = true }
+
+[features]
+default = ["std"]
+std = ["telemetry-model/std"]
+libm = ["telemetry-model/libm"]

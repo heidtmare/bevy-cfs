@@ -1,0 +1,13 @@
+[package]
+name = "gltf-gen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Generates the spacecraft glTF used by the Phase 3 animation spike."
+
+[dependencies]
+# The rig constants and the deploy curve live here, so the asset and the
+# direct-drive kinematics are baked from one definition rather than two.
+telemetry-anim = { workspace = true, features = ["std"] }
