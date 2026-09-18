@@ -43,6 +43,14 @@ and C are the investigation.
 **Exit criterion:** `docker compose up cfs` produces a running `core-cpu1` that emits telemetry on a
 host-reachable UDP port, reproducible from a clean clone.
 
+> **Done, with one amendment** — see `docs/findings/0002`. cFS v7.0.1 builds and runs, but
+> "host-reachable" turned out to be unachievable on Docker Desktop for macOS: it does not forward
+> UDP from a container to the host. Telemetry is reachable from *inside* the container network,
+> which is enough for Phase 0/1 (capturing fixtures) but changes Phase 2 and Phase 4: a native Bevy
+> app on macOS needs a UDP→TCP relay, a bridged Linux VM, or a Linux host for live telemetry.
+> Development against `fake-cfs` and fixture replay is unaffected, which is precisely why that
+> stand-in was built first.
+
 ---
 
 ## 3. Phase 0 — Baseline cFS (2–3 days)
@@ -70,6 +78,10 @@ Separate crates so the flight-agnostic parts stay testable and `no_std`-friendly
   `&[u8]`, plus builders. Property tests for round-trip; golden tests against `fixtures/`.
 - `crates/cfs-msg` — cFE/lab message definitions and message IDs.
   - Start hand-written for the four or five packets you actually need.
+  - **EDS is a build configuration, not a project.** The bundle ships a `native_eds` config
+    alongside `native_std`. Switching to it is a one-word change in the Dockerfile; the open
+    question is only what it does to the generated message IDs and whether the XML is pleasant to
+    consume from Rust.
   - **Then evaluate EDS** (cFS's Electronic Data Sheets, XML message definitions, CMake-gated):
     if enabled, generate Rust structs from the same XML the C build consumes. This is the single
     highest-leverage finding in the whole investigation — it decides whether flight and ground
@@ -192,7 +204,7 @@ and a Bevy dependency there would kill that option.
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| macOS/cFS mismatch eats the schedule | High | Container from day one; Bevy never needs cFS to build |
+| ~~macOS/cFS mismatch eats the schedule~~ | High | **Realized and handled.** Container works; the residue is the UDP limitation above |
 | Silent message-layout mismatch (endianness, padding, msgid v1 vs v2) | High | Hand-annotate one packet before writing a decoder; golden fixtures |
 | Bevy animation API churn between releases | Medium | Pin the version; isolate animation calls in `bevy_cfs` |
 | Telemetry too slow/jittery for convincing animation | Medium | Jitter buffer + interpolation designed in Phase 2, not bolted on |
