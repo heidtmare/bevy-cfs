@@ -85,6 +85,13 @@ cargo run -p viz -- --cmd-port 11234 --tlm-port 11235
 cargo run -p viz -- --offline                                 # no socket at all
 ```
 
+![The slice against fake-cfs](docs/findings/images/viz-fake-cfs.png)
+
+Against `fake-cfs` the panel shows what the live one cannot: a synthetic
+vehicle-state payload gives *every* signal a source, and the jitter buffer is
+caught mid-interpolation — 8 Hz in, samples buffered and frames inserted
+between them, with nothing extrapolated.
+
 `--noop-every SECONDS` drives the command path on a timer, for recordings.
 Findings: [docs/findings/0005-vertical-slice.md](docs/findings/0005-vertical-slice.md).
 
@@ -108,6 +115,12 @@ cross-fades reproduce exactly:
 ```sh
 cargo run -p anim-mappings -- --screenshot out.png --at 2.15   # mid mode-transition
 ```
+
+![Three mappings mid mode-transition](docs/findings/images/mode-transition.png)
+
+That is the frame the command above produces: one telemetry state, three
+mechanisms, and the divergence between direct drive and the clip-driven
+`Transform` printed along the bottom.
 
 Findings: [docs/findings/0004-animation-mappings.md](docs/findings/0004-animation-mappings.md).
 
