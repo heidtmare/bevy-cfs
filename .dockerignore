@@ -1,0 +1,12 @@
+# docker/Dockerfile only COPYs in rust-toolchain.toml and spikes/rust-cfs-app,
+# but the build context (repo root, see docker/compose.yaml) is sent to the
+# Docker daemon in full unless trimmed here — this keeps that send fast.
+target
+spikes/rust-cfs-app/target
+.git
+docs
+assets
+fixtures
+apps
+crates
+tools

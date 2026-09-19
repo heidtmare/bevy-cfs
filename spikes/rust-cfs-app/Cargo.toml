@@ -1,0 +1,28 @@
+[workspace]
+# Deliberately its own workspace, not a member of the root one. Every other
+# member builds and tests offline on the host (PLAN.md's "reproducible
+# offline" discipline); this crate's build.rs requires CFS_SRC_DIR and
+# CFS_BUILD_DIR pointing at a Linux checkout+build of the pinned cFS bundle
+# (see build.rs), which only exist inside docker/Dockerfile's build stage.
+# Folding it into `cargo build --workspace` would break that for everyone on
+# a Mac or in CI. Build it explicitly, inside the container:
+#   cargo build -p rust-cfs-app --manifest-path spikes/rust-cfs-app/Cargo.toml
+
+[package]
+name = "rust-cfs-app"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "Apache-2.0"
+publish = false
+description = "Phase 5 spike: a cFE ES application written in Rust, loaded as a dynamic module."
+
+[lib]
+# cFE's ES loader dlopen()s this like any C app .so. There is no Rust code on
+# the other side of the FFI boundary, so no rlib/dylib metadata is needed.
+crate-type = ["cdylib"]
+
+[build-dependencies]
+bindgen = "0.72"
+
+[dependencies]

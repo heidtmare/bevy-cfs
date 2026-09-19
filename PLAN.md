@@ -207,6 +207,26 @@ Enumerate and answer explicitly, because these decide feasibility:
 **Gate:** honest verdict — *viable / viable with constraints / not worth it* — with the specific
 blocker named. A negative result here is a legitimate deliverable.
 
+> **Done.** See [docs/findings/0006-rust-cfs-app.md](docs/findings/0006-rust-cfs-app.md). Verdict:
+> **viable with constraints**. A pure-Rust `cdylib` loads into cFE ES exactly like a C app — no CMake
+> integration needed, since `add_cfe_app` links C apps against a headers-only interface target and
+> resolves every `CFE_*` symbol at `dlopen` time anyway. It registers with EVS, creates an SB pipe,
+> and publishes correctly-formed telemetry, confirmed live against v7.0.1 and independently verified
+> by capturing the packet off the wire with `tlm-capture` (MID `0x0890`, ~1 Hz, zero drops). bindgen
+> against the real headers worked, with three named, worked-around gaps (macros invisible to it
+> entirely, one cast-typed `#define` it silently drops rather than errors on, and a double-prefixing
+> default on cFE's own enum-naming convention).
+>
+> The constraint: a Rust app that has caught a panic via `catch_unwind` must never call
+> `CFE_ES_ExitApp` again on that thread afterward — doing so crashes the whole `core-cpu1` process
+> (`SIGTRAP`), taking every other app down with it, not just the one that panicked. Confirmed by
+> deliberately crashing the container three different ways to isolate the trigger: it is specifically
+> the combination of a prior `catch_unwind` and a later `CFE_ES_ExitApp` call (itself a forced unwind,
+> via OSAL's `OS_TaskExit` → glibc's `pthread_exit`) on the same thread — either alone is fine. The
+> workaround (skip `CFE_ES_ExitApp` after a caught panic, just return) avoids the crash but leaves
+> cFE ES never informed that the app's task exited, which is the open cost the "with constraints"
+> qualifier is carrying.
+
 ---
 
 ## 9. Repository layout

@@ -1,8 +1,10 @@
 services:
   cfs:
     build:
-      context: .
-      dockerfile: Dockerfile
+      # Repo root, not this directory: the Dockerfile COPYs in
+      # spikes/rust-cfs-app (Phase 5) to build it alongside cFS itself.
+      context: ..
+      dockerfile: docker/Dockerfile
       args:
         # Pinned: see docs/findings/0002. Changing this invalidates every
         # captured fixture and every message ID in the config.

@@ -2,3 +2,8 @@
 /fixtures/*.cfspkt
 !/fixtures/README.md
 .DS_Store
+
+# rust-cfs-app is its own workspace (see its Cargo.toml) and only ever
+# builds inside the Linux container.
+/spikes/rust-cfs-app/target
+/spikes/rust-cfs-app/Cargo.lock
