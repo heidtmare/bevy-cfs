@@ -22,6 +22,7 @@
 //! cargo run -p anim-mappings                       # synthetic telemetry
 //! cargo run -p anim-mappings -- --live             # a running cFS / fake-cfs
 //! cargo run -p anim-mappings -- --screenshot out.png --at 6.0
+//! cargo run -p anim-mappings -- --frames dir/ --from 0 --to 12 --fps 20
 //! ```
 
 use bevy::animation::{RepeatAnimation, graph::AnimationNodeIndex};
@@ -57,22 +58,48 @@ struct Args {
     screenshot: Option<String>,
     /// Timeline position to capture at, seconds.
     at: Option<f32>,
+    /// Directory to write a numbered PNG sequence into.
+    frames: Option<String>,
+    /// Sequence bounds and sampling rate, seconds and frames per second.
+    from: f32,
+    to: f32,
+    fps: f32,
     exit_after: Option<f32>,
 }
 
+impl Args {
+    /// Is the clock being driven by the capture rather than by wall time?
+    fn capturing(&self) -> bool {
+        self.screenshot.is_some() || self.frames.is_some()
+    }
+}
+
 fn parse_args() -> Args {
-    let mut args =
-        Args { live: false, screenshot: None, at: None, exit_after: None };
+    let mut args = Args {
+        live: false,
+        screenshot: None,
+        at: None,
+        frames: None,
+        from: 0.0,
+        to: 12.0,
+        fps: 20.0,
+        exit_after: None,
+    };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--live" => args.live = true,
             "--screenshot" => args.screenshot = it.next(),
             "--at" => args.at = it.next().and_then(|v| v.parse().ok()),
+            "--frames" => args.frames = it.next(),
+            "--from" => args.from = it.next().and_then(|v| v.parse().ok()).unwrap_or(args.from),
+            "--to" => args.to = it.next().and_then(|v| v.parse().ok()).unwrap_or(args.to),
+            "--fps" => args.fps = it.next().and_then(|v| v.parse().ok()).unwrap_or(args.fps),
             "--exit-after" => args.exit_after = it.next().and_then(|v| v.parse().ok()),
             "--help" | "-h" => {
                 println!(
-                    "anim-mappings [--live] [--screenshot PATH] [--at SECONDS] [--exit-after SECONDS]"
+                    "anim-mappings [--live] [--screenshot PATH] [--at SECONDS] [--exit-after SECONDS]\n    \
+                     [--frames DIR] [--from SECONDS] [--to SECONDS] [--fps N]"
                 );
                 std::process::exit(0);
             }
@@ -195,11 +222,45 @@ struct Wiring {
 struct CaptureTarget(Handle<Image>);
 
 /// Screenshot sequencing: wait for the scene, settle, capture, quit.
+///
+/// A recorded sequence is the same machinery with more than one entry. The
+/// clock stops at each listed instant, the frame is captured there, and only
+/// then does it move on — so the recording is a function of the timeline and
+/// not of how fast this machine renders. A laptop that manages 9 fps and one
+/// that manages 200 write byte-identical frames; only the wall-clock wait
+/// differs. Recording in real time instead would have made every capture a
+/// measurement of the recording machine.
 #[derive(Resource)]
 struct Capture {
-    path: String,
+    /// `(timeline position, output path)`, in ascending order.
+    frames: Vec<(f32, String)>,
+    next: usize,
     settled_frames: u32,
-    shot: bool,
+}
+
+/// Expand `--frames DIR --from A --to B --fps N` into the capture list.
+///
+/// Frame times are computed from the index rather than accumulated, so frame
+/// 200 sits exactly where the fps says it does instead of wherever 200 additions
+/// of `1.0 / fps` in `f32` happened to land.
+fn frame_plan(args: &Args) -> Vec<(f32, String)> {
+    if let Some(dir) = &args.frames {
+        let dir = std::path::Path::new(dir);
+        std::fs::create_dir_all(dir).expect("cannot create --frames directory");
+        let count = (((args.to - args.from) * args.fps).round() as i32).max(0) as usize + 1;
+        return (0..count)
+            .map(|i| {
+                let t = args.from + i as f32 / args.fps;
+                (t, dir.join(format!("frame_{i:05}.png")).to_string_lossy().into_owned())
+            })
+            .collect();
+    }
+    match (&args.screenshot, args.at) {
+        (Some(path), Some(at)) => vec![(at, path.clone())],
+        // A single shot with no `--at` captures the first settled frame.
+        (Some(path), None) => vec![(0.0, path.clone())],
+        _ => Vec::new(),
+    }
 }
 
 // ------------------------------------------------------------------ main ---
@@ -230,11 +291,16 @@ fn main() {
     // is not an error.
     app.add_plugins(CfsPlugin { connect: args.live, ..default() });
 
+    let plan = frame_plan(&args);
+
     app.insert_resource(Timeline {
         t: 0.0,
         last_dt: 0.0,
-        step: args.screenshot.as_ref().map(|_| 1.0 / 60.0),
-        target: args.screenshot.as_ref().and(args.at),
+        // A fixed step, not the frame time: the sub-steps between two captured
+        // frames have to be the same ones every run, because `ModeBlend` and the
+        // deploy clip both integrate over them.
+        step: args.capturing().then_some(1.0 / 60.0),
+        target: plan.first().map(|&(t, _)| t),
     })
     .insert_resource(Blend(ModeBlend::new(Mode::Safe, MODE_TRANSITION_S)))
         .insert_resource(ClearColor(Color::srgb(0.02, 0.03, 0.05)))
@@ -282,9 +348,12 @@ fn main() {
     // frame, which looked exactly like a real finding.
     app.add_systems(PostUpdate, update_readout.after(AnimationSystems));
 
-    if let Some(path) = args.screenshot.clone() {
-        app.insert_resource(Capture { path, settled_frames: 0, shot: false })
-            .add_systems(Update, capture_when_ready);
+    if !plan.is_empty() {
+        app.insert_resource(Capture { frames: plan, next: 0, settled_frames: 0 })
+            // After the drivers: the screenshot reads the render target at the
+            // end of the frame, and the frame has to be the one the drivers just
+            // posed.
+            .add_systems(Update, capture_when_ready.after(DriveSet));
     }
     if let Some(after) = args.exit_after {
         app.add_systems(Update, move |time: Res<Time>, mut exit: MessageWriter<AppExit>| {
@@ -309,8 +378,8 @@ fn setup(
 ) {
     commands.insert_resource(Model(assets.load(MODEL)));
 
-    let target = match args.screenshot {
-        Some(_) => {
+    let target = match args.capturing() {
+        true => {
             let size = Extent3d { width: VIEW_W, height: VIEW_H, depth_or_array_layers: 1 };
             let mut image = Image::new_fill(
                 size,
@@ -327,7 +396,7 @@ fn setup(
             commands.insert_resource(CaptureTarget(handle.clone()));
             RenderTarget::Image(handle.into())
         }
-        None => RenderTarget::default(),
+        false => RenderTarget::default(),
     };
 
     let camera = commands
@@ -844,14 +913,17 @@ fn capture_when_ready(
     mut commands: Commands,
     mut capture: ResMut<Capture>,
     target: Res<CaptureTarget>,
-    timeline: Res<Timeline>,
+    mut timeline: ResMut<Timeline>,
     yokes: Query<(), With<Yoke>>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    if capture.shot {
+    if capture.next >= capture.frames.len() {
         capture.settled_frames += 1;
-        // A few frames after the request so the file is flushed before exit.
-        if capture.settled_frames > 40 {
+        // `save_to_disk` encodes on a task pool, so exiting the instant the last
+        // request is made truncates the tail of a sequence. Wait long enough for
+        // the queue to drain — cheap, and the alternative failure is a run that
+        // looks successful and is missing its last few frames.
+        if capture.settled_frames > 120 {
             exit.write(AppExit::Success);
         }
         return;
@@ -860,9 +932,19 @@ fn capture_when_ready(
     if !timeline.at_target() || yokes.iter().count() < 6 {
         return;
     }
-    let path = capture.path.clone();
-    println!("capturing {path}");
+    let total = capture.frames.len();
+    let (_, path) = capture.frames[capture.next].clone();
+    if total == 1 {
+        println!("capturing {path}");
+    } else if capture.next % 20 == 0 || capture.next + 1 == total {
+        println!("capturing frame {} of {total}", capture.next + 1);
+    }
     commands.spawn(Screenshot::image(target.0.clone())).observe(save_to_disk(path));
-    capture.shot = true;
+    capture.next += 1;
     capture.settled_frames = 0;
+    // Leave the clock parked on the last frame once the plan is exhausted, so
+    // the settling frames render the same image rather than drifting onwards.
+    if let Some(&(t, _)) = capture.frames.get(capture.next) {
+        timeline.target = Some(t);
+    }
 }

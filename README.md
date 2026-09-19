@@ -133,6 +133,33 @@ The vehicle also flies itself — it detumbles, deploys its arrays and walks a
 pointing survey with no ground input at all, so connecting late finds a
 spacecraft already at work rather than one waiting to be asked.
 
+![The vehicle flying itself](docs/findings/images/viz-offline.gif)
+
+Twenty-two seconds of that, at real speed and with nothing pressed: the last of
+the detumble, the arrays deploying because the vehicle decided they should, and
+the first survey slew afterwards. This is the `--offline` timeline below rather
+than a live capture, and the panel says so on every frame — `OFFLINE - no
+socket`, `RUST_APP -- (not loaded)`, every source reading `synthetic
+(--offline)`. It is still the same `vehicle-dyn` the flight application runs;
+the difference is which process steps it.
+
+The app records it itself. `--frames` parks the clock on each frame before
+capturing it, so the result is a function of the timeline and not of how fast
+the machine renders — a laptop managing 9 fps and one managing 200 write
+identical frames, and only the wait differs:
+
+```sh
+cargo run --release -p viz -- --offline --frames frames/   # 441 PNGs, t = 8..30 s
+ffmpeg -framerate 20 -i frames/frame_%05d.png -filter_complex \
+  "split[a][b];[a]palettegen=max_colors=64:stats_mode=diff[p];[b][p]paletteuse=dither=none" \
+  -loop 0 docs/findings/images/viz-offline.gif
+```
+
+The window is `sources::OFFLINE_CLIP_FROM_S..OFFLINE_CLIP_TO_S`, pinned by a test
+for the same reason the screenshot's `--at` is: a gain change that shifts the
+sequence would otherwise turn this into twenty-two seconds of a spacecraft
+holding still, and nothing would report it.
+
 Without a container:
 
 ```sh
@@ -179,6 +206,16 @@ cargo run -p anim-mappings -- --screenshot out.png --at 2.15   # mid mode-transi
 That is the frame the command above produces: one telemetry state, three
 mechanisms, and the divergence between direct drive and the clip-driven
 `Transform` printed along the bottom.
+
+![Three mappings through a deployment](docs/findings/images/mappings-deploy.gif)
+
+The twelve seconds around it, recorded the same way
+(`--frames dir/ --from 0 --to 12 --fps 20`). The mode changes at 1.5 s and 2 s
+are where the columns come apart: 1 and 2 snap to each new pose in a single
+frame, 3 takes 0.6 s to cross to it and prints the weights it is mixing on the
+way. Then all three deploy, and the `diff` figure — direct-drive angle minus the
+angle read back from the clip-driven `Transform` — stays a few degrees wide for
+as long as the panels are moving and returns to zero when they stop.
 
 Findings: [docs/findings/0004-animation-mappings.md](docs/findings/0004-animation-mappings.md).
 

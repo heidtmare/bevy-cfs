@@ -293,6 +293,17 @@ pub fn offline_state(t: f32) -> SpacecraftState {
 /// It is the `--at` value the committed deployment screenshot uses.
 pub const OFFLINE_MID_DEPLOY_S: f32 = 14.0;
 
+/// The window the committed README animation records, seconds.
+///
+/// Chosen to contain one of each thing the vehicle does unprompted — the end of
+/// the detumble, the whole array deployment, and a survey slew afterwards — and
+/// pinned by `offline_clip_window_covers_the_sequence` for the same reason
+/// [`OFFLINE_MID_DEPLOY_S`] is: a gain change that shifts the sequence by five
+/// seconds would otherwise turn the animation into eighteen seconds of a
+/// spacecraft holding still, and nothing would report that.
+pub const OFFLINE_CLIP_FROM_S: f32 = 8.0;
+pub const OFFLINE_CLIP_TO_S: f32 = 30.0;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,5 +459,22 @@ mod tests {
 
         assert_eq!(offline_state(30.0).deploy_progress, 1.0, "never finished deploying");
         assert_eq!(offline_state(30.0).mode, Mode::Deployed);
+    }
+
+    /// The recorded window must still contain the whole sequence it claims to
+    /// show, or the README animation silently becomes a still life.
+    #[test]
+    fn offline_clip_window_covers_the_sequence() {
+        let start = offline_state(OFFLINE_CLIP_FROM_S);
+        let end = offline_state(OFFLINE_CLIP_TO_S);
+
+        assert_eq!(start.deploy_progress, 0.0, "the clip opens after the deployment began");
+        assert_eq!(end.deploy_progress, 1.0, "the clip ends before the deployment finished");
+
+        // And it moves: the attitude at the end is not the attitude at the
+        // start, so the window contains a slew rather than only the hinges.
+        let dot: f32 =
+            start.attitude.0.iter().zip(end.attitude.0.iter()).map(|(a, b)| a * b).sum();
+        assert!(dot.abs() < 0.99, "the vehicle barely turns across the clip: dot {dot}");
     }
 }

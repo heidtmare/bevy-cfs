@@ -22,6 +22,7 @@
 //! cargo run -p viz -- --dest-ip 192.168.65.254       # cFS in Docker Desktop
 //! cargo run -p viz -- --offline                      # no socket, synthetic
 //! cargo run -p viz -- --offline --screenshot out.png --at 6.0
+//! cargo run -p viz -- --offline --frames dir/ --from 8 --to 30 --fps 20
 //! cargo run -p viz -- --dest-ip 192.168.65.254 --noop-every 4
 //! ```
 //!
@@ -72,12 +73,23 @@ struct Args {
     offline: bool,
     screenshot: Option<String>,
     at: Option<f32>,
+    /// Directory to write a numbered PNG sequence into.
+    frames: Option<String>,
+    /// Sequence bounds and sampling rate, seconds and frames per second.
+    from: f32,
+    to: f32,
+    fps: f32,
     exit_after: Option<f32>,
     /// Send a `SAMPLE_APP` no-op this often, in seconds.
     noop_every: Option<f32>,
 }
 
 impl Args {
+    /// Is the clock being driven by the capture rather than by wall time?
+    fn capturing(&self) -> bool {
+        self.screenshot.is_some() || self.frames.is_some()
+    }
+
     fn endpoint(&self) -> String {
         if self.offline {
             "offline - no socket".to_string()
@@ -99,6 +111,10 @@ fn parse_args() -> Args {
         offline: false,
         screenshot: None,
         at: None,
+        frames: None,
+        from: sources::OFFLINE_CLIP_FROM_S,
+        to: sources::OFFLINE_CLIP_TO_S,
+        fps: 20.0,
         exit_after: None,
         noop_every: None,
     };
@@ -113,12 +129,17 @@ fn parse_args() -> Args {
             "--offline" => args.offline = true,
             "--screenshot" => args.screenshot = it.next(),
             "--at" => args.at = it.next().and_then(|v| v.parse().ok()),
+            "--frames" => args.frames = it.next(),
+            "--from" => args.from = it.next().and_then(|v| v.parse().ok()).unwrap_or(args.from),
+            "--to" => args.to = it.next().and_then(|v| v.parse().ok()).unwrap_or(args.to),
+            "--fps" => args.fps = it.next().and_then(|v| v.parse().ok()).unwrap_or(args.fps),
             "--exit-after" => args.exit_after = it.next().and_then(|v| v.parse().ok()),
             "--noop-every" => args.noop_every = it.next().and_then(|v| v.parse().ok()),
             "--help" | "-h" => {
                 println!(
                     "viz [--cfs-host HOST] [--cmd-port N] [--tlm-port N] [--dest-ip ADDR]\n    \
                      [--offline] [--screenshot PATH] [--at SECONDS] [--exit-after SECONDS]\n    \
+                     [--frames DIR] [--from SECONDS] [--to SECONDS] [--fps N]\n    \
                      [--noop-every SECONDS]"
                 );
                 std::process::exit(0);
@@ -153,11 +174,47 @@ impl Timeline {
     }
 }
 
+/// Screenshot sequencing: wait for the rig, settle, capture, quit.
+///
+/// A recorded sequence is the same machinery with more than one entry. Offline,
+/// the clock stops at each listed instant and only moves on once that frame has
+/// been requested, so the recording is a function of the timeline rather than of
+/// how fast this machine renders: a laptop that manages 9 fps and one that
+/// manages 200 write the same frames. Against live cFS there is nothing to stop
+/// — the entries are wall-clock instants and a frame is taken at the first
+/// render past each one.
 #[derive(Resource)]
 struct Capture {
-    path: String,
+    /// `(timeline position, output path)`, in ascending order.
+    frames: Vec<(f32, String)>,
+    next: usize,
     settled_frames: u32,
-    shot: bool,
+}
+
+/// Expand `--frames DIR --from A --to B --fps N` into the capture list.
+///
+/// Frame times are computed from the index rather than accumulated, so frame
+/// 200 sits exactly where the fps says it does instead of wherever 200 additions
+/// of `1.0 / fps` in `f32` happened to land.
+fn frame_plan(args: &Args) -> Vec<(f32, String)> {
+    if let Some(dir) = &args.frames {
+        let dir = std::path::Path::new(dir);
+        std::fs::create_dir_all(dir).expect("cannot create --frames directory");
+        let count = (((args.to - args.from) * args.fps).round() as i32).max(0) as usize + 1;
+        return (0..count)
+            .map(|i| {
+                let t = args.from + i as f32 / args.fps;
+                (t, dir.join(format!("frame_{i:05}.png")).to_string_lossy().into_owned())
+            })
+            .collect();
+    }
+    let Some(path) = args.screenshot.clone() else { return Vec::new() };
+    // Offline captures with no `--at` aim at the deployment, which is the one
+    // moment on the timeline worth a still image.
+    match args.at.or(args.offline.then_some(sources::OFFLINE_MID_DEPLOY_S)) {
+        Some(at) => vec![(at, path)],
+        None => Vec::new(),
+    }
 }
 
 /// Window size, and the size of the offscreen image captures render into.
@@ -272,18 +329,16 @@ fn main() {
         ..default()
     });
 
+    let plan = frame_plan(&args);
+
     app.insert_resource(Timeline {
         t: 0.0,
         // A fixed step only makes a capture reproducible when the state is
         // generated from the same clock. Against a live cFS the state comes off
         // the wire, so stepping faster than wall time would just capture an
         // earlier moment — `--at` there means "after this many seconds".
-        step: (args.screenshot.is_some() && args.offline).then_some(1.0 / 60.0),
-        // Offline captures with no `--at` aim at the deployment, which is the
-        // one moment on the timeline worth a still image.
-        target: args.screenshot.as_ref().and(
-            args.at.or(args.offline.then_some(sources::OFFLINE_MID_DEPLOY_S)),
-        ),
+        step: (args.capturing() && args.offline).then_some(1.0 / 60.0),
+        target: plan.first().map(|&(t, _)| t),
     })
     .insert_resource(Blend(ModeBlend::new(Mode::Safe, drive::MODE_TRANSITION_S)))
     .insert_resource(Shown {
@@ -334,9 +389,12 @@ fn main() {
     // animation system has written the transforms — PostUpdate, not Update.
     app.add_systems(PostUpdate, update_panel.after(AnimationSystems));
 
-    if let Some(path) = args.screenshot.clone() {
-        app.insert_resource(Capture { path, settled_frames: 0, shot: false })
-            .add_systems(Update, capture_when_ready);
+    if !plan.is_empty() {
+        app.insert_resource(Capture { frames: plan, next: 0, settled_frames: 0 })
+            // After the drivers: the screenshot reads the render target at the
+            // end of the frame, and the frame has to be the one the drivers just
+            // posed.
+            .add_systems(Update, capture_when_ready.after(DriveSet));
     }
     if let Some(after) = args.exit_after {
         app.add_systems(Update, move |time: Res<Time>, mut exit: MessageWriter<AppExit>| {
@@ -408,8 +466,8 @@ fn setup(
 ) {
     rig::spawn_scene(&mut commands, &assets);
 
-    let target = match args.screenshot {
-        Some(_) => {
+    let target = match args.capturing() {
+        true => {
             let size = Extent3d { width: VIEW_W, height: VIEW_H, depth_or_array_layers: 1 };
             let mut image = Image::new_fill(
                 size,
@@ -426,7 +484,7 @@ fn setup(
             commands.insert_resource(CaptureTarget(handle.clone()));
             RenderTarget::Image(handle.into())
         }
-        None => RenderTarget::default(),
+        false => RenderTarget::default(),
     };
 
     // `RenderTarget` is its own component in 0.19; it is no longer a field of
@@ -585,13 +643,17 @@ fn capture_when_ready(
     mut commands: Commands,
     mut capture: ResMut<Capture>,
     target: Res<CaptureTarget>,
-    timeline: Res<Timeline>,
+    mut timeline: ResMut<Timeline>,
     yokes: Query<(), With<rig::Yoke>>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    if capture.shot {
+    if capture.next >= capture.frames.len() {
         capture.settled_frames += 1;
-        if capture.settled_frames > 40 {
+        // `save_to_disk` encodes on a task pool, so exiting the instant the last
+        // request is made truncates the tail of a sequence. Wait long enough for
+        // the queue to drain — cheap, and the alternative failure is a run that
+        // looks successful and is missing its last few frames.
+        if capture.settled_frames > 120 {
             exit.write(AppExit::Success);
         }
         return;
@@ -599,9 +661,19 @@ fn capture_when_ready(
     if !timeline.at_target() || yokes.iter().count() < 2 {
         return;
     }
-    let path = capture.path.clone();
-    println!("capturing {path}");
+    let total = capture.frames.len();
+    let (_, path) = capture.frames[capture.next].clone();
+    if total == 1 {
+        println!("capturing {path}");
+    } else if capture.next % 20 == 0 || capture.next + 1 == total {
+        println!("capturing frame {} of {total}", capture.next + 1);
+    }
     commands.spawn(Screenshot::image(target.0.clone())).observe(save_to_disk(path));
-    capture.shot = true;
+    capture.next += 1;
     capture.settled_frames = 0;
+    // Leave the clock parked on the last frame once the plan is exhausted, so
+    // the settling frames render the same image rather than drifting onwards.
+    if let Some(&(t, _)) = capture.frames.get(capture.next) {
+        timeline.target = Some(t);
+    }
 }
