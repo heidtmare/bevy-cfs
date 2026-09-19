@@ -20,6 +20,7 @@
 #![forbid(unsafe_code)]
 
 pub mod hk;
+pub mod rust_app;
 pub mod sample_app;
 pub mod to_lab;
 
@@ -58,6 +59,13 @@ pub struct MsgIds {
     pub ci_lab_hk_tlm: MsgId,
     pub sample_app_cmd: MsgId,
     pub sample_app_hk_tlm: MsgId,
+    /// `RUST_APP` command message. See [`rust_app`].
+    pub rust_app_cmd: MsgId,
+    /// `RUST_APP` housekeeping: its own counters.
+    pub rust_app_hk_tlm: MsgId,
+    /// `RUST_APP` vehicle state — attitude, wheels, mode. The packet that gives
+    /// the visualizer something to animate.
+    pub rust_app_vehicle_tlm: MsgId,
 }
 
 impl MsgIds {
@@ -69,6 +77,11 @@ impl MsgIds {
         ci_lab_hk_tlm: MsgId(0x0884),
         sample_app_cmd: MsgId(0x1882),
         sample_app_hk_tlm: MsgId(0x0883),
+        // Not lab defaults at all — see `rust_app`'s own module docs for where
+        // these three come from and why they are not in any mission table.
+        rust_app_cmd: rust_app::CMD_MID,
+        rust_app_hk_tlm: rust_app::HK_TLM_MID,
+        rust_app_vehicle_tlm: rust_app::VEHICLE_TLM_MID,
     };
 
     /// Parse overrides from a minimal `name = 0x1880` config.
@@ -99,6 +112,9 @@ impl MsgIds {
                 "ci_lab_hk_tlm" => &mut ids.ci_lab_hk_tlm,
                 "sample_app_cmd" => &mut ids.sample_app_cmd,
                 "sample_app_hk_tlm" => &mut ids.sample_app_hk_tlm,
+                "rust_app_cmd" => &mut ids.rust_app_cmd,
+                "rust_app_hk_tlm" => &mut ids.rust_app_hk_tlm,
+                "rust_app_vehicle_tlm" => &mut ids.rust_app_vehicle_tlm,
                 _ => return Err(ConfigError { line: lineno + 1 }),
             };
             *slot = MsgId(parsed);

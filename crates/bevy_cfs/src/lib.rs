@@ -41,7 +41,8 @@ use bevy::prelude::*;
 
 use cfs_link::{CfsLink, LinkConfig, RawPacket};
 use cfs_msg::hk::{CiLabHk, SampleAppHk, ToLabHk};
-use cfs_msg::{MsgId, MsgIds, sample_app};
+use cfs_msg::rust_app::RustAppHk;
+use cfs_msg::{MsgId, MsgIds, rust_app, sample_app};
 use telemetry_model::{BufferConfig, BufferStats, Freshness, JitterBuffer, SpacecraftState};
 
 /// System sets, exposed so a consumer can order its own work against telemetry.
@@ -106,6 +107,10 @@ pub struct Housekeeping {
     pub sample_app: Option<SampleAppHk>,
     pub to_lab: Option<ToLabHk>,
     pub ci_lab: Option<CiLabHk>,
+    /// `RUST_APP`'s own counters. `None` against a build without it loaded,
+    /// which is how a panel can tell "the flight app is not there" from "the
+    /// flight app is there and idle".
+    pub rust_app: Option<RustAppHk>,
     /// Mission-epoch timestamp of the most recent housekeeping packet.
     pub last_time: Option<f64>,
 }
@@ -122,6 +127,13 @@ pub enum CfsCommand {
     SampleAppNoop,
     /// `SAMPLE_APP` reset counters. Drives both counters to zero.
     SampleAppResetCounters,
+    /// A command for the Rust flight application, by function code.
+    ///
+    /// One variant carrying a code rather than seven variants, because unlike
+    /// the `sample_app` pair these differ in nothing else — see
+    /// [`cfs_msg::rust_app::command`]. The codes are named constants in that
+    /// module; this type does not re-enumerate them.
+    RustApp(u8),
 }
 
 /// Link and buffer counters, for a health panel.
@@ -161,7 +173,12 @@ impl Default for CfsPlugin {
         Self {
             link: LinkConfig::default(),
             buffer: BufferConfig::default(),
-            tlm_msg_id: MsgIds::LAB_DEFAULTS.sample_app_hk_tlm,
+            // The vehicle-state message: what `spikes/rust-cfs-app` publishes
+            // from inside cFE and what `tools/fake-cfs` publishes in its place.
+            // Until that application existed there was no such message on a
+            // stock bus at all, and this defaulted to `sample_app`'s
+            // housekeeping ID with the two payloads told apart by length.
+            tlm_msg_id: MsgIds::LAB_DEFAULTS.rust_app_vehicle_tlm,
             connect: true,
         }
     }
@@ -235,8 +252,11 @@ fn ingest_packets(
         let mut recognized = false;
         if stream_id == ids.sample_app_hk_tlm.0
             && let Some(v) = SampleAppHk::from_packet(&packet)
-            // A demo packet shares this message ID and is far longer; length is
-            // what tells the two apart without a mode flag.
+            // Kept as a guard even though vehicle state now has a message ID of
+            // its own: `SampleAppHk` is two octets, so without a length check
+            // it would decode the first two octets of *any* packet that landed
+            // on this ID and report them as counters. Refusing is the right
+            // answer to a payload that is not the shape it claims to be.
             && packet.cfe_tlm_payload().map(|p| p.len()) == Ok(SampleAppHk::LEN)
         {
             hk.sample_app = Some(v);
@@ -254,11 +274,17 @@ fn ingest_packets(
             hk.ci_lab = Some(v);
             recognized = true;
         }
+        if stream_id == ids.rust_app_hk_tlm.0
+            && let Some(v) = RustAppHk::from_packet(&packet)
+        {
+            hk.rust_app = Some(v);
+            recognized = true;
+        }
         if recognized && let Ok(t) = packet.tlm_secondary() {
             hk.last_time = Some(t.as_secs_f64());
         }
 
-        match telemetry_model::decode_demo(&packet, config.tlm_msg_id) {
+        match telemetry_model::decode_vehicle_state(&packet, config.tlm_msg_id) {
             Some(sample) => buffer.0.insert(sample),
             None if recognized => {}
             None if stream_id == config.tlm_msg_id.0 => {
@@ -299,10 +325,13 @@ fn send_commands(
     for cmd in commands.read() {
         let mut buf = [0u8; 64];
         let seq = link.0.next_seq();
-        let id = config.msg_ids.sample_app_cmd;
+        let sample = config.msg_ids.sample_app_cmd;
         let built = match cmd {
-            CfsCommand::SampleAppNoop => sample_app::noop(&mut buf, id, seq),
-            CfsCommand::SampleAppResetCounters => sample_app::reset_counters(&mut buf, id, seq),
+            CfsCommand::SampleAppNoop => sample_app::noop(&mut buf, sample, seq),
+            CfsCommand::SampleAppResetCounters => sample_app::reset_counters(&mut buf, sample, seq),
+            CfsCommand::RustApp(fc) => {
+                rust_app::command(&mut buf, config.msg_ids.rust_app_cmd, *fc, seq)
+            }
         };
         match built.map_err(|e| e.to_string()).and_then(|pkt| {
             link.0.send_raw(pkt).map_err(|e| e.to_string())

@@ -15,8 +15,8 @@ use ccsds::{PacketType, PrimaryHeader, TlmSecondaryHeader};
 use cfs_link::LinkConfig;
 use cfs_msg::MsgIds;
 use telemetry_model::{
-    DEMO_PAYLOAD_LEN, DEMO_PAYLOAD_OFFSET, Freshness, Mode, Quat, SpacecraftState,
-    encode_demo_payload,
+    VEHICLE_PAYLOAD_LEN, VEHICLE_PAYLOAD_OFFSET, Freshness, Mode, Quat, SpacecraftState,
+    encode_vehicle_state,
 };
 use bevy_cfs::{CfsPlugin, LinkHealth, Telemetry};
 
@@ -26,7 +26,7 @@ const SOLAR_RATE_DEG_S: f32 = 60.0;
 
 /// Build one demo telemetry packet stamped at `sim_time`.
 fn packet(seq: u16, sim_time: f64) -> Vec<u8> {
-    let total = DEMO_PAYLOAD_OFFSET + DEMO_PAYLOAD_LEN;
+    let total = VEHICLE_PAYLOAD_OFFSET + VEHICLE_PAYLOAD_LEN;
     let mut pkt = vec![0u8; total];
 
     PrimaryHeader::for_total_len(
@@ -57,9 +57,9 @@ fn packet(seq: u16, sim_time: f64) -> Vec<u8> {
         wheel_rpm: [1000.0; 4],
         mode: Mode::Nominal,
     };
-    let mut payload = [0u8; DEMO_PAYLOAD_LEN];
-    encode_demo_payload(&state, &mut payload);
-    pkt[DEMO_PAYLOAD_OFFSET..].copy_from_slice(&payload);
+    let mut payload = [0u8; VEHICLE_PAYLOAD_LEN];
+    encode_vehicle_state(&state, &mut payload);
+    pkt[VEHICLE_PAYLOAD_OFFSET..].copy_from_slice(&payload);
     pkt
 }
 

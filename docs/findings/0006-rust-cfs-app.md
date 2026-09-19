@@ -2,6 +2,16 @@
 
 **Status:** closed. See [`spikes/rust-cfs-app`](../../spikes/rust-cfs-app).
 
+> **Superseded in one detail by [0007](0007-vehicle-dynamics-in-cfe.md).** This
+> finding reports the application's telemetry being observed on the wire at MID
+> `0x0890` and treats that as confirmation the packet was correctly formed. The
+> packet was correctly formed. It reached the ground for an unrelated reason:
+> `0x0890` is `MD_HK_TLM_MID` and is already in `to_lab`'s subscription table,
+> so the observation confirmed less than it appeared to. 0007 §2 has the full
+> account and the corrected IDs. Everything else below stands, and the
+> application described here has since grown a vehicle-dynamics model — the
+> structure, the bindgen results and the panic finding are unchanged.
+
 **Verdict: viable with constraints.** A cFE ES application written entirely in
 Rust builds, loads, registers with EVS, creates a Software Bus pipe, and
 publishes correctly-formed telemetry from inside a live cFS v7.0.1 container —

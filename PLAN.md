@@ -229,6 +229,38 @@ blocker named. A negative result here is a legitimate deliverable.
 
 ---
 
+## 8b. Phase 5b — closing the vehicle-dynamics gap from the flight side
+
+Not in the original plan. It was added because Phase 4 ended with the visualizer showing
+`-- no source --` for most of the vehicle, and Phase 5 had just demonstrated that the missing
+publisher could be *written* — which turns a documented limitation into a task.
+
+The question: can the `no_std` crates this plan has protected since Phase 1 actually be reused on
+the flight side, in the way §9's discipline note asserts they could?
+
+> **Done.** See [docs/findings/0007-vehicle-dynamics-in-cfe.md](docs/findings/0007-vehicle-dynamics-in-cfe.md).
+> Verdict: **yes, and the reuse cost almost nothing.** `crates/vehicle-dyn` — rigid-body attitude
+> dynamics, a four-wheel reaction-wheel array with real momentum saturation, a PD controller with
+> gyroscopic feed-forward, sun tracking and a mission sequencer — is compiled into
+> `spikes/rust-cfs-app` and runs inside cFE, into `tools/fake-cfs`, and into `apps/viz --offline`.
+> The wire format has one definition (`telemetry_model::encode_vehicle_state`) called by all three
+> producers and inverted by the one consumer. The container builds against the same source files
+> the host workspace tests; the only new machinery is a four-line workspace stub, because
+> `version.workspace = true` needs a root and the real one lists members a flight image should not
+> contain.
+>
+> **The obstacle was not the FFI, the dynamics or the `no_std` discipline — it was allocating three
+> message IDs**, which failed twice and produced no error either time. `0x0890` reached the ground
+> and looked like success; it is `MD_HK_TLM_MID`, already in `to_lab`'s subscription table, and
+> would have collided silently had the `md` app been loaded. The replacement command ID `0x1891`
+> passed a check against *that* table and is in `sch_lab`'s **schedule** table, so the scheduler
+> sent the new app phantom commands it appeared to be receiving from the ground.
+>
+> Both tables are generated from the bundle's topic-ID allocation, which is the thing that should
+> have been edited. That makes §4's `native_eds` question considerably less optional than it looked:
+> it is no longer "upside", it is the mechanism by which this class of silent error stops being
+> possible.
+
 ## 9. Repository layout
 
 ```
@@ -237,8 +269,9 @@ crates/
   ccsds/                   # space packet codec, no_std-friendly
   cfs-msg/                 # cFE/lab message types (+ EDS codegen evaluation)
   cfs-link/                # UDP transport, handshake, reconnect, link metrics
-  telemetry-model/         # decoded packets -> domain state
+  telemetry-model/         # decoded packets -> domain state, and the wire format
   telemetry-anim/          # domain state -> animation maths, no Bevy
+  vehicle-dyn/             # attitude dynamics + wheels; compiled into the cFE app
   bevy_cfs/                # Bevy plugin: resources, events, time sync, interpolation
 apps/
   viz/                     # the Bevy application
@@ -248,7 +281,7 @@ tools/
   gltf-gen/                # generates assets/spacecraft.gltf
 spikes/
   anim-mappings/           # Phase 3 mapping comparison
-  rust-cfs-app/            # Phase 5 FFI spike
+  rust-cfs-app/            # Phase 5 cFE application: FFI spike, now flying the vehicle
 docker/                    # cFS build + runtime images, compose file
 fixtures/                  # captured packets (golden tests)
 docs/
@@ -256,10 +289,15 @@ docs/
 assets/                    # glTF model + authored clips
 ```
 
-**Discipline:** `crates/ccsds`, `crates/cfs-msg`, `crates/telemetry-model` and `crates/telemetry-anim`
-must not depend on Bevy, and are built `no_std` in CI so the claim is checked rather than asserted.
-If Architecture B or C goes ahead, those four crates are what gets reused on the flight side, and a
-Bevy dependency there would kill that option.
+**Discipline:** `crates/ccsds`, `crates/cfs-msg`, `crates/telemetry-model`, `crates/telemetry-anim`
+and `crates/vehicle-dyn` must not depend on Bevy, and are built `no_std` in CI so the claim is
+checked rather than asserted.
+
+This began as a bet about a hypothetical flight side. It is no longer hypothetical: four of the five
+(`ccsds`, `cfs-msg`, `telemetry-model`, `vehicle-dyn`) are compiled into `spikes/rust-cfs-app` and
+loaded by cFE ES, so a Bevy dependency added to any of them now breaks the container build rather
+than merely forfeiting a future option. `telemetry-anim` is the exception and stays ground-side by
+nature — it is about presentation, which flight software has no opinion about.
 
 ---
 
@@ -271,8 +309,9 @@ Bevy dependency there would kill that option.
 | Silent message-layout mismatch (endianness, padding, msgid v1 vs v2) | High | Hand-annotate one packet before writing a decoder; golden fixtures |
 | Bevy animation API churn between releases | Medium | Pin the version; isolate animation calls in `bevy_cfs` |
 | Telemetry too slow/jittery for convincing animation | Medium | Jitter buffer + interpolation designed in Phase 2, not bolted on |
-| Phase 5 FFI rabbit hole | Medium | Hard time-box; a negative verdict is an acceptable output |
-| EDS turns out to be impractical to consume | Low | Hand-written types already work; EDS is upside, not a dependency |
+| ~~Phase 5 FFI rabbit hole~~ | Medium | **Did not materialize.** bindgen and the FFI were the easy part; see 0006 and 0007 |
+| Hand-allocated message IDs collide with the mission's own | High | **Realized twice, silently.** See 0007 §2. Mitigated for now by dumping `to_lab_sub.tbl` *and* `sch_lab_table.tbl` and asserting the chosen values in a test; properly fixed only by EDS |
+| EDS turns out to be impractical to consume | Low | Hand-written types already work — but it is no longer only upside, it is the fix for the row above |
 
 ---
 
@@ -283,6 +322,8 @@ Bevy dependency there would kill that option.
 3. A written recommendation mapping telemetry signal types to Bevy animation mechanisms.
 4. A yes/no/constrained verdict on Rust code running inside cFS, with the blocker named.
 5. Everything reproducible offline via fixtures and `fake-cfs`.
+6. *(Added with Phase 5b)* The `no_std` crates demonstrably reused on the flight side rather than
+   merely kept eligible for it.
 
 ---
 

@@ -54,7 +54,7 @@ fn main() {
     let mut builder = bindgen::Builder::default()
         .header_contents(
             "cfe_wrapper.h",
-            "#include \"cfe_es.h\"\n#include \"cfe_evs.h\"\n#include \"cfe_sb.h\"\n#include \"cfe_msg.h\"\n",
+            "#include \"cfe_es.h\"\n#include \"cfe_evs.h\"\n#include \"cfe_sb.h\"\n#include \"cfe_msg.h\"\n#include \"cfe_time.h\"\n",
         )
         .clang_arg("-DSIMULATION=native")
         .clang_arg("-D_XOPEN_SOURCE=600")
@@ -66,6 +66,9 @@ fn main() {
         .allowlist_function("CFE_EVS_.*")
         .allowlist_function("CFE_SB_.*")
         .allowlist_function("CFE_MSG_.*")
+        // CFE_TIME_GetTime is how the control loop measures its own step
+        // instead of assuming its timeout fired on schedule — see src/lib.rs.
+        .allowlist_function("CFE_TIME_.*")
         .allowlist_type("CFE_.*")
         .allowlist_var("CFE_.*")
         // cFE's C enum constants already carry the enum's own name as a

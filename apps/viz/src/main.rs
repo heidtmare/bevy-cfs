@@ -180,6 +180,51 @@ struct CaptureTarget(Handle<Image>);
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct DriveSet;
 
+// ---------------------------------------------------------------- framing ---
+
+/// Radius of the sphere the rig sweeps out, in world units.
+///
+/// Measured from `tools/gltf-gen`'s own numbers rather than guessed: the outer
+/// panel's far edge sits at `0.45` (yoke) `+ 0.3` (inner hinge) `+ 1.0` (outer
+/// hinge) `+ 1.0` (panel half-length past its origin) = `2.75` from the vehicle
+/// origin when deployed, and the vehicle rotates freely about that origin, so
+/// the *sphere* of that radius is what has to stay in frame at every attitude.
+///
+/// This was found the unglamorous way. The camera was framed when the only
+/// thing on screen was a stowed vehicle — radius about `1.2` — and the first
+/// capture after the arrays started deploying themselves had both wings running
+/// off the top and bottom of the image.
+const RIG_RADIUS: f32 = 2.75;
+
+/// Where the camera looks.
+///
+/// Left of the vehicle, not at it. The panel occupies the left third of the
+/// window, so aiming off-centre pushes the spacecraft into the clear space on
+/// the right instead of putting it behind the text.
+const AIM: Vec3 = Vec3::new(-1.3, 0.0, 0.0);
+
+/// Direction from [`AIM`] to the camera. A three-quarter view: enough off-axis
+/// that the solar arrays read as a plane rather than a line, and enough above
+/// that the deployment's hinge staging is visible.
+const VIEW_DIR: Vec3 = Vec3::new(0.574, 0.223, 0.788);
+
+/// Margin over the distance at which the rig exactly fills the frame.
+///
+/// Room for the horizontal offset [`AIM`] introduces, and so a fully deployed
+/// vehicle does not touch the edges at any attitude.
+const FRAMING_MARGIN: f32 = 1.35;
+
+/// Distance from [`AIM`] to the camera, so that a sphere of [`RIG_RADIUS`]
+/// fits the frame with [`FRAMING_MARGIN`] to spare.
+///
+/// Derived rather than written down, so that changing the rig or the field of
+/// view moves the camera instead of silently cropping the vehicle.
+fn camera_distance() -> f32 {
+    // Bevy's default vertical field of view is 45°.
+    let half_fov = std::f32::consts::FRAC_PI_8;
+    RIG_RADIUS / half_fov.tan() * FRAMING_MARGIN
+}
+
 // ------------------------------------------------------------------ main ---
 
 fn main() {
@@ -210,13 +255,19 @@ fn main() {
             std::process::exit(2);
         });
 
+    let msg_ids = cfs_msg::MsgIds::LAB_DEFAULTS;
     app.add_plugins(CfsPlugin {
         link: LinkConfig {
             cmd_addr,
             tlm_bind: SocketAddr::from(([0, 0, 0, 0], args.tlm_port)),
             dest_ip: args.dest_ip.clone(),
+            msg_ids,
             ..Default::default()
         },
+        // The Rust flight application's vehicle-state message, which `fake-cfs`
+        // also publishes on. One message ID for one payload layout, whoever
+        // produced it.
+        tlm_msg_id: msg_ids.rust_app_vehicle_tlm,
         connect: !args.offline,
         ..default()
     });
@@ -228,7 +279,11 @@ fn main() {
         // the wire, so stepping faster than wall time would just capture an
         // earlier moment — `--at` there means "after this many seconds".
         step: (args.screenshot.is_some() && args.offline).then_some(1.0 / 60.0),
-        target: args.screenshot.as_ref().and(args.at),
+        // Offline captures with no `--at` aim at the deployment, which is the
+        // one moment on the timeline worth a still image.
+        target: args.screenshot.as_ref().and(
+            args.at.or(args.offline.then_some(sources::OFFLINE_MID_DEPLOY_S)),
+        ),
     })
     .insert_resource(Blend(ModeBlend::new(Mode::Safe, drive::MODE_TRANSITION_S)))
     .insert_resource(Shown {
@@ -380,7 +435,8 @@ fn setup(
         .spawn((
             Camera3d::default(),
             target,
-            Transform::from_xyz(2.6, 1.35, 4.6).looking_at(Vec3::new(-0.75, 0.05, 0.0), Vec3::Y),
+            Transform::from_translation(AIM + VIEW_DIR * camera_distance())
+                .looking_at(AIM, Vec3::Y),
         ))
         .id();
 
@@ -452,6 +508,21 @@ fn resolve_source(
 #[derive(Resource, Default)]
 struct CurrentSources(Option<sources::Sources>);
 
+/// Keys that fly the vehicle, as (key, function code, label for the panel).
+///
+/// These reach `RUST_APP` — the Rust application running inside cFE — and change
+/// what the spacecraft is *doing*, not just what a counter reads. The round
+/// trip is therefore visible as motion: press `T` and the model slews, because
+/// flight software integrated a new attitude and published it.
+pub const VEHICLE_KEYS: [(KeyCode, u8, &str); 6] = [
+    (KeyCode::KeyT, cfs_msg::rust_app::NEXT_TARGET_CC, "[T] slew to next target"),
+    (KeyCode::KeyH, cfs_msg::rust_app::HOLD_CC, "[H] inertial hold"),
+    (KeyCode::KeyD, cfs_msg::rust_app::DEPLOY_CC, "[D] deploy arrays"),
+    (KeyCode::KeyS, cfs_msg::rust_app::STOW_CC, "[S] stow arrays"),
+    (KeyCode::KeyF, cfs_msg::rust_app::SAFE_CC, "[F] safe mode"),
+    (KeyCode::KeyM, cfs_msg::rust_app::DUMP_MOMENTUM_CC, "[M] dump momentum"),
+];
+
 /// The command path. One keypress, one real packet to `ci_lab`.
 fn command_keys(
     keys: Res<ButtonInput<KeyCode>>,
@@ -469,6 +540,15 @@ fn command_keys(
         out.write(CfsCommand::SampleAppResetCounters);
         loop_state.on_sent(hk.sample_app, now);
     }
+    for (key, function_code, _) in VEHICLE_KEYS {
+        if keys.just_pressed(key) {
+            out.write(CfsCommand::RustApp(function_code));
+        }
+    }
+    // Only the `sample_app` pair is tracked by the round-trip timer: its
+    // CommandCounter is a scalar that provably changed, whereas "the vehicle
+    // started slewing" is not something this can time without reimplementing
+    // the controller's notion of when a command took effect.
     loop_state.observe(hk.sample_app, now);
 }
 
@@ -489,7 +569,7 @@ fn update_panel(
     let data = panel::PanelData {
         endpoint: &args.endpoint(),
         pipeline: pipeline.0.unwrap_or(Pipeline::Waiting),
-        sources: sources.0.unwrap_or(sources::Sources::demo()),
+        sources: sources.0.unwrap_or(sources::Sources::standin()),
         state: shown.state,
         freshness: shown.freshness,
         health: &health,

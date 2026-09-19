@@ -1,0 +1,37 @@
+# Workspace stub for the container build of `spikes/rust-cfs-app`.
+#
+# The four `crates/*` this image copies in declare `version.workspace = true`
+# and friends, so Cargo needs a workspace root above them to inherit from. The
+# repository's real root manifest cannot be used: it lists members this image
+# does not have (apps/viz, the tools, the Bevy plugin), and copying those in
+# would drag a renderer's dependency tree into a flight-software build.
+#
+# `members = []` with the crates listed as `exclude` would be the other way to
+# spell this. Listing them as members instead means `cargo build` here also
+# type-checks them, which is a small amount of free verification that the
+# no_std crates really do build in this environment.
+#
+# Keep the inherited keys below in sync with the root Cargo.toml's
+# `[workspace.package]`. They are duplicated rather than shared because the
+# whole point is that this build does not read the root manifest.
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/ccsds",
+    "crates/cfs-msg",
+    "crates/telemetry-model",
+    "crates/vehicle-dyn",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+ccsds = { path = "crates/ccsds", default-features = false }
+cfs-msg = { path = "crates/cfs-msg", default-features = false }
+telemetry-model = { path = "crates/telemetry-model", default-features = false }
+vehicle-dyn = { path = "crates/vehicle-dyn", default-features = false }

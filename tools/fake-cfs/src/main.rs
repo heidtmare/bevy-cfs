@@ -8,6 +8,19 @@
 //! enable-output command arrives. If the visualizer has a handshake bug, it
 //! fails here rather than during the first live test.
 //!
+//! # What is and is not a stand-in
+//!
+//! The transport is a stand-in. The *spacecraft* is not: the telemetry this
+//! sends is produced by `crates/vehicle-dyn`, stepped here exactly as
+//! `spikes/rust-cfs-app` steps it inside cFE, and encoded by the same
+//! `telemetry_model::encode_vehicle_state`. So `fake-cfs` and a live cFS
+//! publish the same packets describing the same vehicle, and the only
+//! difference is which process the integration ran in.
+//!
+//! That was not true of the earlier version, which generated a sine wave. The
+//! difference matters because it is what makes an offline screenshot evidence
+//! about the live system rather than merely a picture of the renderer.
+//!
 //! Usage:
 //!   fake-cfs serve  [--cmd-port 1234] [--tlm-port 1235] [--rate 10]
 //!   fake-cfs replay <fixture> [--tlm-port 1235] [--rate 10] [--loop]
@@ -19,9 +32,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ccsds::{PacketType, PrimaryHeader, TlmSecondaryHeader};
 use cfs_msg::{MsgIds, to_lab};
-use telemetry_model::{
-    DEMO_PAYLOAD_LEN, DEMO_PAYLOAD_OFFSET, Mode, Quat, SpacecraftState, encode_demo_payload,
-};
+use telemetry_model::{VEHICLE_PAYLOAD_LEN, VEHICLE_PAYLOAD_OFFSET, encode_vehicle_state};
+use vehicle_dyn::{Command, Vehicle};
 
 const USAGE: &str = "\
 fake-cfs — stand-in cFS telemetry source
@@ -76,25 +88,41 @@ fn serve(args: &[String]) -> std::io::Result<()> {
     let mut dest: Option<SocketAddr> = None;
     let mut seq: u16 = 0;
     let period = Duration::from_secs_f64(1.0 / rate.max(0.1));
-    let start = Instant::now();
     let mut next_send = Instant::now();
     let mut buf = [0u8; 2048];
+
+    // The vehicle runs whether or not anyone is listening, exactly as it does
+    // on the flight side — so a visualizer connecting late finds a spacecraft
+    // already part-way through its survey rather than one that starts when it
+    // is observed.
+    let mut vehicle = Vehicle::new();
+    let mut last_step = Instant::now();
 
     loop {
         // Commands first, so enabling output takes effect immediately.
         if let Ok((n, from)) = cmd_socket.recv_from(&mut buf) {
             match handle_command(&buf[..n], from.ip(), tlm_port) {
-                Some(addr) => {
+                Incoming::EnableOutput(addr) => {
                     if dest != Some(addr) {
                         println!("fake-cfs: output enabled -> {addr}");
                     }
                     dest = Some(addr);
                 }
-                None => println!("fake-cfs: command received (not enable-output)"),
+                Incoming::Vehicle(cmd) => {
+                    println!("fake-cfs: vehicle command {cmd:?}");
+                    vehicle.command(cmd);
+                }
+                Incoming::Other => println!("fake-cfs: command received (not one we model)"),
             }
         }
 
         let now = Instant::now();
+        // Step on every wake-up, not only on send: the integrator wants small
+        // steps, and the publish rate is a downlink property that should not
+        // change how the vehicle flies.
+        vehicle.step(now.duration_since(last_step).as_secs_f32());
+        last_step = now;
+
         if now >= next_send {
             // Advance the schedule by exactly one period rather than restarting
             // it from now, so a late wake-up does not push every later packet
@@ -104,52 +132,93 @@ fn serve(args: &[String]) -> std::io::Result<()> {
                 next_send = now + period;
             }
             if let Some(addr) = dest {
-                let pkt = build_demo_packet(&mut seq, start.elapsed().as_secs_f64());
+                let pkt = build_vehicle_packet(&mut seq, &vehicle);
                 tlm_socket.send_to(&pkt, addr)?;
             }
         }
     }
 }
 
-/// Returns the telemetry destination if this was an enable-output command.
+/// What an uplinked datagram turned out to be.
+#[derive(Debug, PartialEq)]
+enum Incoming {
+    /// `to_lab` enable-output, naming where telemetry should go.
+    EnableOutput(SocketAddr),
+    /// A `RUST_APP` command this stand-in knows how to apply.
+    Vehicle(Command),
+    /// Anything else, including `to_lab` add-packet: a real `to_lab` has a
+    /// subscription table to maintain and this does not, so those are
+    /// acknowledged by being ignored rather than by being wrong.
+    Other,
+}
+
+/// Classify an uplinked command.
 ///
-/// The address in the payload is what a real `to_lab` honors, but it is often
-/// unroutable from here (a container's view of the host). Falling back to the
-/// command's source address is what makes this usable on a laptop.
-fn handle_command(packet: &[u8], from: IpAddr, tlm_port: u16) -> Option<SocketAddr> {
-    let pkt = ccsds::SpacePacket::parse(packet).ok()?;
-    if pkt.primary().stream_id() != MsgIds::LAB_DEFAULTS.to_lab_cmd.0 {
-        return None;
+/// For enable-output, the address in the payload is what a real `to_lab`
+/// honors, but it is often unroutable from here (a container's view of the
+/// host). Falling back to the command's source address is what makes this
+/// usable on a laptop.
+fn handle_command(packet: &[u8], from: IpAddr, tlm_port: u16) -> Incoming {
+    let Ok(pkt) = ccsds::SpacePacket::parse(packet) else { return Incoming::Other };
+    let Ok(secondary) = pkt.cmd_secondary() else { return Incoming::Other };
+    let ids = MsgIds::LAB_DEFAULTS;
+    let stream_id = pkt.primary().stream_id();
+
+    if stream_id == ids.rust_app_cmd.0 {
+        return match vehicle_command(secondary.function_code) {
+            Some(cmd) => Incoming::Vehicle(cmd),
+            None => Incoming::Other,
+        };
     }
-    if pkt.cmd_secondary().ok()?.function_code != to_lab::OUTPUT_ENABLE_CC {
-        return None;
+
+    if stream_id != ids.to_lab_cmd.0 || secondary.function_code != to_lab::OUTPUT_ENABLE_CC {
+        return Incoming::Other;
     }
-    let payload = pkt.payload().ok()?;
+    let Ok(payload) = pkt.payload() else { return Incoming::Other };
     let ip = std::str::from_utf8(payload)
         .ok()
         .map(|s| s.trim_end_matches('\0'))
         .and_then(|s| s.parse::<IpAddr>().ok())
         .filter(|ip| !ip.is_unspecified())
         .unwrap_or(from);
-    Some(SocketAddr::new(ip, tlm_port))
+    Incoming::EnableOutput(SocketAddr::new(ip, tlm_port))
 }
 
-/// A demo telemetry packet matching `telemetry_model::decode_demo`.
+/// The same function-code table the flight application uses.
 ///
-/// Framed exactly as cFE frames telemetry, alignment spare included, so the
-/// offline path exercises the same offsets as the live one.
-fn build_demo_packet(seq: &mut u16, t: f64) -> Vec<u8> {
-    let total = DEMO_PAYLOAD_OFFSET + DEMO_PAYLOAD_LEN;
+/// Duplicated here rather than shared, because the flight app's copy lives in
+/// its own workspace — and the duplication is bounded by the constants in
+/// `cfs_msg::rust_app`, which both sides import. A new command added to one and
+/// not the other is ignored, not misinterpreted.
+fn vehicle_command(function_code: u8) -> Option<Command> {
+    use cfs_msg::rust_app::*;
+    Some(match function_code {
+        SAFE_CC => Command::Safe,
+        NOMINAL_CC => Command::Nominal,
+        NEXT_TARGET_CC => Command::NextTarget,
+        HOLD_CC => Command::Hold,
+        DEPLOY_CC => Command::Deploy,
+        STOW_CC => Command::Stow,
+        DUMP_MOMENTUM_CC => Command::DumpMomentum,
+        _ => return None,
+    })
+}
+
+/// A vehicle-state packet, framed exactly as cFE frames telemetry — alignment
+/// spare included — so the offline path exercises the same offsets as the live
+/// one, and on the same message ID the flight application publishes.
+fn build_vehicle_packet(seq: &mut u16, vehicle: &Vehicle) -> Vec<u8> {
+    let total = VEHICLE_PAYLOAD_OFFSET + VEHICLE_PAYLOAD_LEN;
     let mut pkt = vec![0u8; total];
 
     let hdr = PrimaryHeader::for_total_len(
-        MsgIds::LAB_DEFAULTS.sample_app_hk_tlm.apid(),
+        MsgIds::LAB_DEFAULTS.rust_app_vehicle_tlm.apid(),
         PacketType::Telemetry,
         true,
         *seq,
         total,
     )
-    .expect("demo packet fits the length field");
+    .expect("vehicle packet fits the length field");
     hdr.write(&mut pkt[..6]).unwrap();
     *seq = seq.wrapping_add(1) & 0x3FFF;
 
@@ -163,36 +232,9 @@ fn build_demo_packet(seq: &mut u16, t: f64) -> Vec<u8> {
     // pkt[12..16] is CFE_MSG_TelemetryHeader_t::Spare — four octets of
     // alignment padding that cFE writes and every decoder must skip.
 
-    // Slow yaw sweep, a rotating solar array, and a deployment that runs once
-    // over the first 20 seconds — enough motion to exercise every Phase 3
-    // animation mapping at once.
-    let yaw = (t * 0.2) % std::f64::consts::TAU;
-    let q = [0.0f32, 0.0, (yaw / 2.0).sin() as f32, (yaw / 2.0).cos() as f32];
-    let solar_array_deg = ((t * 6.0) % 360.0) as f32;
-    let deploy = ((t - 2.0) / 18.0).clamp(0.0, 1.0) as f32;
-    let mode = if deploy <= 0.0 {
-        Mode::Nominal
-    } else if deploy < 1.0 {
-        Mode::Deploying
-    } else {
-        Mode::Deployed
-    };
-
-    let mut wheel_rpm = [0.0f32; 4];
-    for (i, rpm) in wheel_rpm.iter_mut().enumerate() {
-        *rpm = (1000.0 + 200.0 * (t * 0.5 + i as f64).sin()) as f32;
-    }
-    let state = SpacecraftState {
-        attitude: Quat(q),
-        solar_array_deg,
-        deploy_progress: deploy,
-        wheel_rpm,
-        mode,
-    };
-
-    let mut payload = [0u8; DEMO_PAYLOAD_LEN];
-    encode_demo_payload(&state, &mut payload);
-    pkt[DEMO_PAYLOAD_OFFSET..].copy_from_slice(&payload);
+    let mut payload = [0u8; VEHICLE_PAYLOAD_LEN];
+    encode_vehicle_state(&vehicle.state(), &mut payload);
+    pkt[VEHICLE_PAYLOAD_OFFSET..].copy_from_slice(&payload);
 
     pkt
 }
@@ -239,18 +281,36 @@ fn replay(args: &[String]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use telemetry_model::decode_demo;
+    use telemetry_model::decode_vehicle_state;
+
+    fn stepped(seconds: f32) -> Vehicle {
+        let mut v = Vehicle::new();
+        for _ in 0..((seconds / 0.02) as usize) {
+            v.step(0.02);
+        }
+        v
+    }
 
     #[test]
     fn generated_packets_decode() {
         let mut seq = 0;
-        let pkt = build_demo_packet(&mut seq, 10.0);
+        let vehicle = stepped(45.0);
+        let pkt = build_vehicle_packet(&mut seq, &vehicle);
         let parsed = ccsds::SpacePacket::parse(&pkt).unwrap();
-        let sample = decode_demo(&parsed, MsgIds::LAB_DEFAULTS.sample_app_hk_tlm)
-            .expect("demo packet must decode");
-        assert_eq!(sample.state.mode, Mode::Deploying);
-        assert!(sample.state.deploy_progress > 0.0 && sample.state.deploy_progress < 1.0);
+        let sample = decode_vehicle_state(&parsed, MsgIds::LAB_DEFAULTS.rust_app_vehicle_tlm)
+            .expect("vehicle packet must decode");
+        assert_eq!(sample.state, vehicle.state());
         assert_eq!(seq, 1);
+    }
+
+    /// The packet must carry the flight application's message ID, or the viz
+    /// would need two decoder configurations for one payload layout.
+    #[test]
+    fn packets_use_the_flight_applications_message_id() {
+        let mut seq = 0;
+        let pkt = build_vehicle_packet(&mut seq, &Vehicle::new());
+        let parsed = ccsds::SpacePacket::parse(&pkt).unwrap();
+        assert_eq!(parsed.primary().stream_id(), cfs_msg::rust_app::VEHICLE_TLM_MID.0);
     }
 
     #[test]
@@ -260,6 +320,49 @@ mod tests {
         let cmd =
             to_lab::enable_output(&mut buf, MsgIds::LAB_DEFAULTS.to_lab_cmd, 0, "0.0.0.0").unwrap();
         let from: IpAddr = "127.0.0.1".parse().unwrap();
-        assert_eq!(handle_command(cmd, from, 1235), Some(SocketAddr::from(([127, 0, 0, 1], 1235))));
+        assert_eq!(
+            handle_command(cmd, from, 1235),
+            Incoming::EnableOutput(SocketAddr::from(([127, 0, 0, 1], 1235)))
+        );
+    }
+
+    /// A vehicle command has to reach the model here as well as in flight, or
+    /// the keys would work against a container and silently do nothing offline.
+    #[test]
+    fn vehicle_commands_are_recognized_and_applied() {
+        let mut buf = [0u8; 64];
+        let cmd = cfs_msg::rust_app::command(
+            &mut buf,
+            MsgIds::LAB_DEFAULTS.rust_app_cmd,
+            cfs_msg::rust_app::DEPLOY_CC,
+            0,
+        )
+        .unwrap();
+        let from: IpAddr = "127.0.0.1".parse().unwrap();
+        assert_eq!(handle_command(cmd, from, 1235), Incoming::Vehicle(Command::Deploy));
+
+        let mut vehicle = stepped(45.0);
+        vehicle.command(Command::Deploy);
+        for _ in 0..500 {
+            vehicle.step(0.02);
+        }
+        assert!(vehicle.state().deploy_progress > 0.0);
+    }
+
+    /// `to_lab` add-packet arrives here on every keepalive cycle; it must be
+    /// ignored rather than mistaken for an enable-output.
+    #[test]
+    fn add_packet_is_ignored_not_misread() {
+        let mut buf = [0u8; 64];
+        let cmd = to_lab::add_packet(
+            &mut buf,
+            MsgIds::LAB_DEFAULTS.to_lab_cmd,
+            0,
+            MsgIds::LAB_DEFAULTS.rust_app_vehicle_tlm,
+            4,
+        )
+        .unwrap();
+        let from: IpAddr = "127.0.0.1".parse().unwrap();
+        assert_eq!(handle_command(cmd, from, 1235), Incoming::Other);
     }
 }

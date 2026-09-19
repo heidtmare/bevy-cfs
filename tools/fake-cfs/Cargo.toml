@@ -10,3 +10,6 @@ description = "Stand-in for a running cFS instance: synthetic telemetry and fixt
 ccsds = { workspace = true, features = ["std"] }
 cfs-msg = { workspace = true, features = ["std"] }
 telemetry-model = { workspace = true, features = ["std"] }
+# The same vehicle model the cFE application runs. `fake-cfs` is a stand-in for
+# the *transport*, not for the spacecraft.
+vehicle-dyn = { workspace = true, features = ["std"] }

@@ -1,0 +1,16 @@
+[package]
+name = "vehicle-dyn"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Rigid-body attitude dynamics and reaction-wheel control. Flight-side code: no_std, no Bevy, no sockets."
+
+[dependencies]
+telemetry-model = { workspace = true }
+libm = { version = "0.2", optional = true }
+
+[features]
+default = ["std"]
+std = ["telemetry-model/std"]
+libm = ["dep:libm", "telemetry-model/libm"]

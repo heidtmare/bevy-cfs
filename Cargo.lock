@@ -2510,6 +2510,7 @@ dependencies = [
  "ccsds",
  "cfs-msg",
  "telemetry-model",
+ "vehicle-dyn",
 ]
 
 [[package]]
@@ -5260,6 +5261,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1bddf1187be692e79c5ffeab891132dfb0f236ed36a43c7ed39f1165ee20191"
 
 [[package]]
+name = "vehicle-dyn"
+version = "0.1.0"
+dependencies = [
+ "libm",
+ "telemetry-model",
+]
+
+[[package]]
 name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5275,6 +5284,7 @@ dependencies = [
  "cfs-msg",
  "telemetry-anim",
  "telemetry-model",
+ "vehicle-dyn",
 ]
 
 [[package]]

@@ -7,12 +7,38 @@ land.
 
 ## State
 
-**Phases 0-4 complete.** `apps/viz` runs against the containerized cFS v7.0.1,
-decodes real telemetry, animates it, and closes the command loop: a keypress
-becomes a real `SAMPLE_APP` no-op on the software bus, and the counter it
-increments comes back on the downlink and moves the model.
+**Phases 0-5 complete.** `apps/viz` runs against the containerized cFS v7.0.1,
+decodes real telemetry, animates it, and closes the command loop. And the
+telemetry it animates is now produced by a **cFE application written in Rust,
+running inside that container**: `spikes/rust-cfs-app` integrates rigid-body
+attitude dynamics and reaction-wheel control and publishes the result on the
+software bus, so the spacecraft on screen is being flown by flight software
+rather than described by a generator.
 
 ![The slice against live cFS](docs/findings/images/viz-live-cfs.png)
+
+Every row in that panel names a real cFE field. That is new: until Phase 5 the
+attitude and wheel rows read `-- no source --`, because **stock cFS publishes no
+vehicle dynamics at all** — no attitude, no joint angles, no wheel speeds, since
+those come from a mission's own applications and the bundle ships none. The way
+to close that gap was to write the missing application, and the interesting part
+is that it shares its code with the ground:
+
+```
+crates/vehicle-dyn  --compiled into-->  spikes/rust-cfs-app  (inside cFE)
+                    --compiled into-->  tools/fake-cfs       (a host process)
+                    --compiled into-->  apps/viz --offline   (the renderer)
+```
+
+One `no_std` crate for the vehicle model, one function for the wire format
+(`telemetry_model::encode_vehicle_state`), no second copy anywhere and no C
+header to drift out of sync. `docker/Dockerfile` builds the flight application
+against the same source files `cargo test --workspace` compiles.
+
+Nothing about the dynamics was hard. **Allocating three message IDs** was, and
+it failed twice without producing a single error message — once by working for
+the wrong reason, once by receiving commands nobody sent. See
+[0007](docs/findings/0007-vehicle-dynamics-in-cfe.md).
 
 The verification backlog is closed. Confirmed against the real build: message
 IDs, `to_lab` command code and payload, timestamp layout and epoch, the command
@@ -31,12 +57,18 @@ a display that keeps animating after telemetry stops is inventing data. Verified
 against induced packet loss, reordering and signal loss in
 [headless tests](crates/bevy_cfs/tests/headless.rs).
 
-Two things worth knowing up front:
+Three things worth knowing up front:
 
-- **Stock cFS publishes no vehicle dynamics.** No attitude, no joint angles, no
-  wheel speeds — those come from a mission's own applications. The viz shows
-  `-- no source --` for the signals that do not exist rather than filling them
-  in, and names the real cFE field behind every one that does.
+- **The viz still refuses to invent a signal.** It shows `-- no source --` for
+  anything nothing on the bus carries, and against a cFS *without* the Rust
+  application loaded that is still most of the vehicle — which is the honest
+  measurement of how much of a spacecraft a stock cFS describes. A test asserts
+  it.
+- **It also does not take a packet's word for who wrote it.** `fake-cfs` and the
+  flight application emit byte-identical packets on the same message ID, because
+  they share the encoder, so the packet cannot identify its own author. The
+  panel's "inside cFE" claim rests on `RUST_APP`'s own housekeeping being on the
+  bus — evidence the vehicle packet cannot manufacture.
 - **`to_lab` needs this machine's IPv4 address as cFS sees it.** Under Docker
   Desktop that is the host gateway (`--dest-ip 192.168.65.254`), never
   `127.0.0.1` and never the IPv6 `host.docker.internal`. An earlier finding
@@ -49,16 +81,20 @@ Two things worth knowing up front:
 | [crates/cfs-msg](crates/cfs-msg) | cFE message IDs, lab commands, real housekeeping payloads | no_std |
 | [crates/telemetry-model](crates/telemetry-model) | Decoded telemetry as domain state + interpolation | no_std |
 | [crates/telemetry-anim](crates/telemetry-anim) | Telemetry→animation mapping maths, no Bevy | no_std |
+| [crates/vehicle-dyn](crates/vehicle-dyn) | Attitude dynamics, reaction wheels, mission sequencer — **runs inside cFE** | no_std |
 | [crates/cfs-link](crates/cfs-link) | UDP transport, handshake, link health | std |
 | [crates/bevy_cfs](crates/bevy_cfs) | Bevy plugin: resources, systems, playback | std |
 | [tools/fake-cfs](tools/fake-cfs) | Synthetic cFS: telemetry generator and fixture replayer | std |
 | [tools/tlm-capture](tools/tlm-capture) | Record real telemetry to a fixture | std |
 | [tools/gltf-gen](tools/gltf-gen) | Generates `assets/spacecraft.gltf` — the rig is source code | std |
 | [spikes/anim-mappings](spikes/anim-mappings) | Phase 3: three animation mappings, side by side | std |
+| [spikes/rust-cfs-app](spikes/rust-cfs-app) | Phase 5: a cFE application in Rust, flying the vehicle | std |
 | [apps/viz](apps/viz) | Phase 4: the vertical slice — live cFS in, commands out | std |
 
-The four `no_std` crates must never gain a Bevy dependency: they are what gets
-reused on the flight side if Architecture B goes ahead.
+The five `no_std` crates must never gain a Bevy dependency: they are what gets
+reused on the flight side. Four of them now genuinely are — `ccsds`, `cfs-msg`,
+`telemetry-model` and `vehicle-dyn` are compiled into `spikes/rust-cfs-app` and
+loaded by cFE ES — so this is a constraint with teeth rather than a convention.
 
 `bevy_cfs` takes `bevy` with `default-features = false` — ECS and time, no
 renderer — so the workspace tests headlessly without a GPU. `apps/viz` and
@@ -77,6 +113,26 @@ increments `CommandCounter` on the flight side, and the next housekeeping packet
 brings it back — typically 1-5 s later, because the cadence is a scheduler tick,
 not network latency.
 
+Six more keys command the *vehicle* rather than a counter, and their round trip
+is visible as motion — press **T** and the model slews, because flight software
+integrated a new attitude and published it:
+
+| Key | Command |
+|---|---|
+| **T** | Slew to the next pointing target |
+| **H** | Inertial hold — freeze on the current attitude |
+| **D** / **S** | Deploy / stow the solar arrays |
+| **F** | Safe mode — give up pointing, damp the rates |
+| **M** | Dump the reaction wheels' stored momentum |
+
+**H** and **F** are deliberately different and look different: inertial hold
+keeps the attitude controller running and stays put, safe mode abandons pointing
+entirely and coasts to a stop wherever it is.
+
+The vehicle also flies itself — it detumbles, deploys its arrays and walks a
+pointing survey with no ground input at all, so connecting late finds a
+spacecraft already at work rather than one waiting to be asked.
+
 Without a container:
 
 ```sh
@@ -87,13 +143,15 @@ cargo run -p viz -- --offline                                 # no socket at all
 
 ![The slice against fake-cfs](docs/findings/images/viz-fake-cfs.png)
 
-Against `fake-cfs` the panel shows what the live one cannot: a synthetic
-vehicle-state payload gives *every* signal a source, and the jitter buffer is
-caught mid-interpolation — 8 Hz in, samples buffered and frames inserted
-between them, with nothing extrapolated.
+Worth comparing against the live capture above. Same vehicle, same packet
+layout, same model — `fake-cfs` runs `vehicle-dyn` in a host process instead of
+inside cFE. The panel reports the difference rather than glossing it: the source
+column reads `fake-cfs vehicle-state payload` and the flight-software block says
+`RUST_APP -- (not loaded)`.
 
 `--noop-every SECONDS` drives the command path on a timer, for recordings.
-Findings: [docs/findings/0005-vertical-slice.md](docs/findings/0005-vertical-slice.md).
+Findings: [0005](docs/findings/0005-vertical-slice.md),
+[0007](docs/findings/0007-vehicle-dynamics-in-cfe.md).
 
 ## See the three animation mappings
 
@@ -168,18 +226,29 @@ cargo check -p ccsds          --no-default-features
 cargo check -p cfs-msg        --no-default-features
 cargo check -p telemetry-model --no-default-features --features libm
 cargo check -p telemetry-anim  --no-default-features --features libm
+cargo check -p vehicle-dyn     --no-default-features --features libm
 ```
 
 No network, no cFS, no container required.
 
 ## Next
 
-1. **Try the `native_eds` build configuration.** Now the highest-leverage
-   remaining question: it decides whether flight and ground types can share one
-   source of truth instead of drifting. Expect different message IDs — the golden
-   tests are the tripwire.
-2. **Phase 5, Architecture B:** `spikes/rust-cfs-app` — a Rust cFS application
-   loaded by cFE ES. Time-boxed hard; a negative verdict is a legitimate result.
-3. Command authentication. `ci_lab` accepts any well-formed datagram on UDP 1234
+1. **Try the `native_eds` build configuration.** Still the highest-leverage
+   remaining question, and Phase 5 sharpened it considerably: the Rust
+   application's three message IDs are hand-picked constants verified by dumping
+   two binary tables, and getting them wrong produced no error either time. EDS
+   would make topic-ID allocation the single source of truth for both flight and
+   ground. Expect different message IDs — the golden tests are the tripwire.
+2. **Table services.** `CFE_TBL_*` is the one cFE subsystem the Rust application
+   still has not touched, and the gains and inertia it flies with are compile-time
+   constants that a real application would carry in a table. Tables involve a
+   memory-sharing and CRC-validation model a Rust struct must match byte for
+   byte; whether that is comfortable is an open question.
+3. **Close the `CFE_ES_ExitApp` blocker** from
+   [0006 §4](docs/findings/0006-rust-cfs-app.md) — an app that has caught a panic
+   can never report its exit status, and what ES does with a task that silently
+   dies is untested.
+4. Command authentication. `ci_lab` accepts any well-formed datagram on UDP 1234
    with checksum validation switched off, which is fine for a lab build and worth
-   saying out loud before anyone points this at something that matters.
+   saying out loud before anyone points this at something that matters. It now
+   matters slightly more: those datagrams change the vehicle's attitude.

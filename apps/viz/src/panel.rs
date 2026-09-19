@@ -67,6 +67,14 @@ pub fn playback_line(pipeline: Pipeline, freshness: Freshness) -> String {
         Pipeline::Derived => {
             "LIVE (derived) - housekeeping steps at the scheduler rate, not interpolated".into()
         }
+        // There is no jitter buffer offline: the state is computed for this
+        // frame's timeline position, so there is nothing to interpolate
+        // *between*. Reporting "interpolating between real samples" here would
+        // be the panel telling exactly the kind of lie it exists to catch —
+        // and it did, until a capture was read carefully.
+        Pipeline::Offline => {
+            "OFFLINE - vehicle model stepped locally, no packets involved".into()
+        }
         Pipeline::Waiting => freshness_line(Freshness::NoData),
         _ => freshness_line(freshness),
     }
@@ -127,6 +135,17 @@ pub fn render(data: &PanelData<'_>) -> String {
         )),
         None => out.push_str("  CI_LAB      --\n"),
     }
+    match data.hk.rust_app {
+        Some(v) => out.push_str(&format!(
+            "  RUST_APP    cmd {:3}  err {:3}  cycles {}  targets {}{}\n",
+            v.command_counter,
+            v.command_error_counter,
+            v.control_cycles,
+            v.targets_commanded,
+            if v.wheels_saturated != 0 { "  WHEELS SATURATED" } else { "" },
+        )),
+        None => out.push_str("  RUST_APP    --  (not loaded: no vehicle dynamics on this bus)\n"),
+    }
     match data.hk.last_time {
         Some(t) => out.push_str(&format!("  mission time {t:.2}s since 1980-01-01\n\n")),
         None => out.push_str("  mission time --\n\n"),
@@ -143,6 +162,7 @@ pub fn render(data: &PanelData<'_>) -> String {
         s.deploy_progress,
         s.mode
     ));
+    out.push_str(&format!("  wheels {}\n", wheel_line(&s.wheel_rpm)));
     match data.drawn_hinge_deg {
         Some(deg) => out.push_str(&format!("  inner hinge as drawn {deg:7.2}deg\n\n")),
         None => out.push_str("  inner hinge as drawn --\n\n"),
@@ -151,7 +171,45 @@ pub fn render(data: &PanelData<'_>) -> String {
     out.push_str("COMMAND  (real packets to ci_lab)\n");
     out.push_str("  [N] SAMPLE_APP NOOP      [R] SAMPLE_APP RESET_COUNTERS\n");
     out.push_str(&format!("  {}\n", data.commands.summary()));
+    out.push_str("  RUST_APP: ");
+    for (i, (_, _, label)) in crate::VEHICLE_KEYS.iter().enumerate() {
+        // Three to a line; the panel is narrow and a wrapped line of key hints
+        // is harder to read than three short ones.
+        out.push_str(label);
+        out.push_str(if i % 3 == 2 { "\n            " } else { "  " });
+    }
+    out.push('\n');
 
+    out
+}
+
+/// Wheel speeds, with a bar for each.
+///
+/// The bars are scaled against the momentum limit rather than against the
+/// largest value seen, so a wheel at 90% of saturation looks near-full even
+/// when the others are idle. Auto-scaling would make the most dangerous state —
+/// all four wheels loaded — look identical to all four idle.
+fn wheel_line(rpm: &[f32; 4]) -> String {
+    let limit = vehicle_dyn::saturation_rpm();
+    let mut out = String::new();
+    for (i, r) in rpm.iter().enumerate() {
+        if i > 0 {
+            out.push_str("  ");
+        }
+        out.push_str(&format!("{r:6.0}{}", bar(r.abs() / limit)));
+    }
+    out
+}
+
+/// A four-cell bar for a `0..=1` fraction, in ASCII blocks.
+fn bar(fraction: f32) -> String {
+    const CELLS: usize = 4;
+    let filled = (fraction.clamp(0.0, 1.0) * CELLS as f32).round() as usize;
+    let mut out = String::from(" [");
+    for i in 0..CELLS {
+        out.push(if i < filled { '#' } else { '.' });
+    }
+    out.push(']');
     out
 }
 
@@ -214,7 +272,13 @@ mod tests {
         let line = playback_line(Pipeline::Derived, Freshness::Live);
         assert!(line.contains("derived"), "{line}");
         assert!(!line.contains("interpolating"), "{line}");
-        assert!(playback_line(Pipeline::Demo, Freshness::Live).contains("interpolating"));
+        assert!(playback_line(Pipeline::Flight, Freshness::Live).contains("interpolating"));
+        assert!(playback_line(Pipeline::Standin, Freshness::Live).contains("interpolating"));
+
+        // Offline has no packets at all, so it has nothing to interpolate.
+        let offline = playback_line(Pipeline::Offline, Freshness::Live);
+        assert!(!offline.contains("interpolating"), "{offline}");
+        assert!(offline.contains("no packets"), "{offline}");
     }
 
     /// The staleness wording is the panel's most important output and the
@@ -259,6 +323,54 @@ mod tests {
         };
         let text = render(&data(Freshness::Live, &hk, &health, &cmds));
         assert!(text.contains("SAMPLE_APP  cmd   0"), "{text}");
+    }
+
+    /// The absence of the flight application is the reason half the panel says
+    /// `-- no source --`, so it must be stated rather than left to inference.
+    #[test]
+    fn an_absent_flight_app_explains_itself() {
+        let (hk, health, cmds) =
+            (Housekeeping::default(), LinkHealth::default(), CommandLoop::default());
+        let text = render(&data(Freshness::NoData, &hk, &health, &cmds));
+        assert!(text.contains("RUST_APP    --"), "{text}");
+        assert!(text.contains("no vehicle dynamics on this bus"), "{text}");
+    }
+
+    /// Wheel saturation is the one vehicle fault this telemetry can show, and a
+    /// number alone does not read as a fault.
+    #[test]
+    fn saturated_wheels_are_called_out_in_words() {
+        let (health, cmds) = (LinkHealth::default(), CommandLoop::default());
+        let hk = Housekeeping {
+            rust_app: Some(cfs_msg::rust_app::RustAppHk {
+                wheels_saturated: 1,
+                control_cycles: 900,
+                targets_commanded: 4,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let text = render(&data(Freshness::Live, &hk, &health, &cmds));
+        assert!(text.contains("WHEELS SATURATED"), "{text}");
+        assert!(text.contains("cycles 900"), "{text}");
+    }
+
+    /// The bar has to distinguish a loaded wheel from an idle one at a glance,
+    /// and must be scaled against saturation rather than against its neighbours.
+    #[test]
+    fn wheel_bars_are_scaled_against_saturation_not_each_other() {
+        let limit = vehicle_dyn::saturation_rpm();
+        let idle = wheel_line(&[0.0, 0.0, 0.0, 0.0]);
+        assert!(idle.contains("[....]"), "{idle}");
+        assert!(!idle.contains('#'), "an idle wheel drew a filled bar: {idle}");
+
+        // Four equal wheels near the limit must not look like four idle ones.
+        let loaded = wheel_line(&[limit * 0.95; 4]);
+        assert!(loaded.contains("[####]"), "{loaded}");
+
+        // Sign is irrelevant to loading: a wheel spinning backwards at the
+        // limit is just as saturated.
+        assert_eq!(wheel_line(&[-limit; 4]).matches('#').count(), 16);
     }
 
     #[test]

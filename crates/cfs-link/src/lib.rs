@@ -43,11 +43,43 @@ pub const DEFAULT_TLM_PORT: u16 = 2234;
 /// them silently.
 const MAX_DATAGRAM: usize = 16 * 1024;
 
-/// How often to re-send the enable-output command.
+/// How often to re-send the enable-output command and the subscriptions.
 ///
-/// `to_lab` forgets its destination when cFS restarts, so a viz that sent the
-/// command once would go quiet forever after a restart. Re-sending is idempotent.
+/// `to_lab` forgets its destination *and* its runtime subscriptions when cFS
+/// restarts, so a viz that sent them once would go quiet forever after a
+/// restart it never noticed. Re-sending is harmless: enable-output is
+/// idempotent, and an add-packet for a stream `to_lab` already carries is
+/// answered with an error event and no change.
 const ENABLE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Streams to ask `to_lab` for at connect time, with their queue depths.
+///
+/// The stock subscription table is compiled into the mission build and names
+/// only the bundle's own applications, so anything published by
+/// `spikes/rust-cfs-app` has to be requested at runtime — see
+/// [`cfs_msg::to_lab::add_packet`]. Vehicle state gets a queue of 4 because it
+/// is published at 10 Hz against `to_lab`'s own slower service loop; one would
+/// drop samples the jitter buffer then has to paper over.
+fn runtime_subscriptions(ids: &MsgIds) -> [(cfs_msg::MsgId, u8); 2] {
+    [(ids.rust_app_vehicle_tlm, 4), (ids.rust_app_hk_tlm, 1)]
+}
+
+/// How long the runtime-subscribed streams may be silent before the
+/// subscriptions are sent again.
+///
+/// Re-subscribing unconditionally on every keepalive would be simpler, and was
+/// the first version. It is wrong in a way worth naming: `to_lab` answers an
+/// add-packet for a stream it already carries by incrementing its *command
+/// error counter*, which this project puts on screen. Within a minute the
+/// panel showed a dozen errors caused entirely by the ground software asking
+/// for something it already had — noise in exactly the indicator an operator
+/// uses to notice real problems.
+///
+/// Silence is the signal that actually means "the subscription is gone": cFS
+/// restarted, `to_lab` forgot, and nothing is arriving. Four seconds is several
+/// times the 10 Hz publish rate and comfortably longer than a slow scheduler
+/// tick, so a healthy link never trips it.
+const SUBSCRIPTION_SILENCE: Duration = Duration::from_secs(4);
 
 #[derive(Clone, Debug)]
 pub struct LinkConfig {
@@ -83,6 +115,9 @@ impl Default for LinkConfig {
 #[derive(Debug, Default)]
 pub struct LinkStats {
     pub packets_received: AtomicU64,
+    /// Milliseconds since process start at the last packet on a
+    /// runtime-subscribed stream. Zero until one arrives.
+    pub last_subscribed_ms: AtomicU64,
     pub bytes_received: AtomicU64,
     pub packets_dropped: AtomicU64,
     pub parse_errors: AtomicU64,
@@ -103,6 +138,18 @@ impl LinkStats {
             0 => None,
             ms => Some(started.elapsed().saturating_sub(Duration::from_millis(ms))),
         }
+    }
+}
+
+/// Whether nothing has arrived on a runtime-subscribed stream recently.
+///
+/// "Never" counts as silent, so the first keepalive after a connect that found
+/// no flight application still re-asks — which is what makes the viz recover
+/// when cFS is restarted with the application loaded, without a reconnect.
+fn subscriptions_are_silent(stats: &LinkStats, started: Instant) -> bool {
+    match stats.last_subscribed_ms.load(Ordering::Relaxed) {
+        0 => true,
+        ms => started.elapsed().saturating_sub(Duration::from_millis(ms)) > SUBSCRIPTION_SILENCE,
     }
 }
 
@@ -154,6 +201,8 @@ impl CfsLink {
         {
             let stats = Arc::clone(&stats);
             let shutdown = Arc::clone(&shutdown);
+            let subscribed: Vec<u16> =
+                runtime_subscriptions(&config.msg_ids).iter().map(|(id, _)| id.0).collect();
             thread::Builder::new().name("cfs-tlm-rx".into()).spawn(move || {
                 let mut buf = vec![0u8; MAX_DATAGRAM];
                 let mut last_seq: HashMap<u16, u16> = HashMap::new();
@@ -192,9 +241,11 @@ impl CfsLink {
 
                     stats.packets_received.fetch_add(1, Ordering::Relaxed);
                     stats.bytes_received.fetch_add(n as u64, Ordering::Relaxed);
-                    stats
-                        .last_packet_ms
-                        .store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+                    let elapsed_ms = started.elapsed().as_millis() as u64;
+                    stats.last_packet_ms.store(elapsed_ms, Ordering::Relaxed);
+                    if subscribed.contains(&sid) {
+                        stats.last_subscribed_ms.store(elapsed_ms, Ordering::Relaxed);
+                    }
 
                     let raw = RawPacket { bytes: datagram.to_vec(), received: Instant::now() };
                     match tx.try_send(raw) {
@@ -220,6 +271,9 @@ impl CfsLink {
         };
 
         link.enable_output(&config.dest_ip)?;
+        // Order matters only in that both must happen; a subscription added
+        // before output is enabled is still remembered.
+        link.subscribe_runtime_packets();
         link.spawn_keepalive(config.dest_ip);
         Ok(link)
     }
@@ -233,6 +287,7 @@ impl CfsLink {
         let shutdown = Arc::clone(&self.shutdown);
         let stats = Arc::clone(&self.stats);
         let msg_ids = self.msg_ids;
+        let started = self.started;
         let _ = thread::Builder::new().name("cfs-keepalive".into()).spawn(move || {
             let mut seq: u16 = 1;
             while !shutdown.load(Ordering::Relaxed) {
@@ -247,6 +302,20 @@ impl CfsLink {
                     stats.commands_sent.fetch_add(1, Ordering::Relaxed);
                 }
                 seq = seq.wrapping_add(1) & 0x3FFF;
+
+                // Only when the subscribed streams have gone quiet. See
+                // SUBSCRIPTION_SILENCE for why this is not unconditional.
+                if subscriptions_are_silent(&stats, started) {
+                    for (stream, depth) in runtime_subscriptions(&msg_ids) {
+                        if let Ok(pkt) =
+                            to_lab::add_packet(&mut buf, msg_ids.to_lab_cmd, seq, stream, depth)
+                            && socket.send_to(pkt, addr).is_ok()
+                        {
+                            stats.commands_sent.fetch_add(1, Ordering::Relaxed);
+                        }
+                        seq = seq.wrapping_add(1) & 0x3FFF;
+                    }
+                }
             }
         });
     }
@@ -258,6 +327,31 @@ impl CfsLink {
         let pkt = to_lab::enable_output(&mut buf, self.msg_ids.to_lab_cmd, seq, dest_ip)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
         self.send_raw(pkt)
+    }
+
+    /// Whether the runtime-subscribed streams have been silent long enough to
+    /// be worth asking for again.
+    pub fn subscriptions_silent(&self) -> bool {
+        subscriptions_are_silent(&self.stats, self.started)
+    }
+
+    /// Ask `to_lab` for the packets that are not in its compiled-in table.
+    ///
+    /// Failures are logged, not returned: a build without the Rust application
+    /// loaded will never publish these, and refusing to connect in that case
+    /// would break every other use of this link.
+    pub fn subscribe_runtime_packets(&self) {
+        for (stream, depth) in runtime_subscriptions(&self.msg_ids) {
+            let mut buf = [0u8; 64];
+            let seq = self.next_seq();
+            match to_lab::add_packet(&mut buf, self.msg_ids.to_lab_cmd, seq, stream, depth)
+                .map_err(|e| e.to_string())
+                .and_then(|pkt| self.send_raw(pkt).map_err(|e| e.to_string()))
+            {
+                Ok(()) => {}
+                Err(e) => eprintln!("cfs-link: subscribing {stream} failed: {e}"),
+            }
+        }
     }
 
     /// Send an already-built command packet to `ci_lab`.

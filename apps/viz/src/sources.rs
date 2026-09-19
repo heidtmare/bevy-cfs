@@ -1,27 +1,38 @@
 //! Where each animated signal's value comes from, and what to do when the
 //! answer is "nowhere".
 //!
-//! This module exists because of the single most awkward fact in the whole
-//! investigation: **a stock cFS bundle publishes no vehicle dynamics.** There
-//! is no attitude quaternion, no joint angle and no wheel speed anywhere on the
-//! software bus, because those come from a mission's own applications and the
-//! bundle ships none. What it does publish is the flight software's own
+//! This module exists because of what used to be the most awkward fact in the
+//! whole investigation: **a stock cFS bundle publishes no vehicle dynamics.**
+//! There is no attitude quaternion, no joint angle and no wheel speed anywhere
+//! on the software bus, because those come from a mission's own applications
+//! and the bundle ships none. What it does publish is the flight software's own
 //! housekeeping — command counters, uplink statistics, the mission clock.
 //!
 //! There are two honest responses to that and one dishonest one. The dishonest
-//! one is to quietly run the demo generator behind a window labelled "live".
-//! The honest ones are to show nothing where there is no signal, and to derive
-//! what genuinely can be derived from the packets that do arrive — clearly
-//! labelled as derived. This module does both, and the panel prints the source
-//! of every signal so the distinction is on screen rather than in a comment.
+//! one is to quietly run a generator behind a window labelled "live". The
+//! honest ones are to show nothing where there is no signal, and to derive what
+//! genuinely can be derived from the packets that do arrive — clearly labelled
+//! as derived. This module does both, and the panel prints the source of every
+//! signal so the distinction is on screen rather than in a comment.
 //!
-//! The derived mappings are demo mappings and are not pretending otherwise.
-//! What is *not* a demo is the path: every byte behind them was decoded from a
-//! real cFE packet that crossed a real socket.
+//! # The third response: publish the missing packet
+//!
+//! There is now a fourth source, and it is the interesting one.
+//! `spikes/rust-cfs-app` is a cFE application, written in Rust, loaded into the
+//! same cFS container — and it publishes real vehicle dynamics on the software
+//! bus, computed by `crates/vehicle-dyn` running inside cFE. Against a build
+//! with it loaded, every row in the panel names a real flight field and nothing
+//! is derived or missing.
+//!
+//! All four sources still coexist, and the ranking in [`resolve`] is the whole
+//! contract: a flight vehicle-state packet beats a stand-in, a stand-in beats
+//! derivation from housekeeping, and derivation beats inventing a number. The
+//! panel says which one won.
 
 use bevy::prelude::Resource;
 use bevy_cfs::{Housekeeping, Telemetry};
-use telemetry_model::{Freshness, Mode, Quat, SpacecraftState};
+use telemetry_model::{Freshness, Mode, SpacecraftState};
+
 
 /// How many uplinked datagrams correspond to a full array deployment.
 ///
@@ -35,9 +46,15 @@ const ARRAY_DEG_PER_S: f64 = 6.0;
 /// Where a signal's value came from this frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
-    /// Decoded from the demo vehicle-state payload (`fake-cfs` or a replayed
-    /// fixture). Every field is present because the generator invented it.
-    Demo,
+    /// Computed by `vehicle-dyn` inside the cFE application and decoded from
+    /// the vehicle-state packet it published. The named field is the one in
+    /// `vehicle_dyn::Vehicle` that produced it.
+    Flight(&'static str),
+    /// The same payload from `tools/fake-cfs` — the same model, stepped in a
+    /// host process instead of inside cFE. Distinguished from `Flight` because
+    /// "a real cFS computed this" is a different claim from "the same code
+    /// computed this somewhere else", and the panel should not conflate them.
+    Standin,
     /// Derived from a real cFE housekeeping field, named here.
     Derived(&'static str),
     /// Generated locally by `--offline`. Named so a screenshot can never be
@@ -51,7 +68,8 @@ pub enum Source {
 impl Source {
     pub fn label(self) -> &'static str {
         match self {
-            Source::Demo => "demo vehicle-state payload",
+            Source::Flight(field) => field,
+            Source::Standin => "fake-cfs vehicle-state payload",
             Source::Offline => "synthetic (--offline)",
             Source::Derived(field) => field,
             Source::None => "-- no source --",
@@ -70,17 +88,31 @@ pub struct Sources {
 }
 
 impl Sources {
-    /// Every signal from the demo vehicle-state payload.
-    pub fn demo() -> Self {
-        Self::ALL_DEMO
+    /// Every signal from the stand-in's vehicle-state payload.
+    pub fn standin() -> Self {
+        Self::ALL_STANDIN
     }
 
-    const ALL_DEMO: Self = Self {
-        attitude: Source::Demo,
-        solar_array: Source::Demo,
-        deploy: Source::Demo,
-        mode: Source::Demo,
-        wheels: Source::Demo,
+    const ALL_STANDIN: Self = Self {
+        attitude: Source::Standin,
+        solar_array: Source::Standin,
+        deploy: Source::Standin,
+        mode: Source::Standin,
+        wheels: Source::Standin,
+    };
+
+    /// Every signal from the Rust cFE application's vehicle-state packet.
+    ///
+    /// The names are the fields of `vehicle_dyn::Vehicle` that produced each
+    /// value, not the packet offsets — what an operator wants to know is which
+    /// piece of flight software is responsible, and the offsets are in
+    /// `telemetry_model::encode_vehicle_state`.
+    const ALL_FLIGHT: Self = Self {
+        attitude: Source::Flight("RUST_APP.attitude (integrated)"),
+        solar_array: Source::Flight("RUST_APP.array_deg (sun tracking)"),
+        deploy: Source::Flight("RUST_APP.deploy_progress"),
+        mode: Source::Flight("RUST_APP.mode"),
+        wheels: Source::Flight("RUST_APP.wheel_rpm x4"),
     };
 
     /// Every signal generated locally.
@@ -123,8 +155,10 @@ impl Sources {
 pub enum Pipeline {
     /// Nothing has arrived yet.
     Waiting,
-    /// A vehicle-state payload is arriving and driving the rig directly.
-    Demo,
+    /// A vehicle-state payload from the Rust cFE application is driving the rig.
+    Flight,
+    /// A vehicle-state payload from `fake-cfs` is driving the rig.
+    Standin,
     /// Only flight-software housekeeping is arriving; the rig is driven by
     /// signals derived from it.
     Derived,
@@ -136,7 +170,8 @@ impl Pipeline {
     pub fn label(self) -> &'static str {
         match self {
             Pipeline::Waiting => "WAITING - no telemetry yet",
-            Pipeline::Demo => "LIVE - vehicle-state payload",
+            Pipeline::Flight => "LIVE - vehicle state from RUST_APP, inside cFE",
+            Pipeline::Standin => "LIVE - vehicle state from fake-cfs",
             Pipeline::Derived => "LIVE - derived from cFE housekeeping",
             Pipeline::Offline => "OFFLINE - no socket, synthetic state",
         }
@@ -164,10 +199,23 @@ pub fn resolve(
     hk: &Housekeeping,
     baseline: &mut Baseline,
 ) -> (SpacecraftState, Sources, Pipeline) {
-    // A demo payload beats derivation: if something is publishing real vehicle
-    // state, that is the thing to show.
+    // A vehicle-state payload beats derivation: if something is publishing real
+    // vehicle state, that is the thing to show.
+    //
+    // Which producer it came from is decided by whether `RUST_APP` housekeeping
+    // is also on the bus, not by anything in the vehicle packet itself. Both
+    // producers emit byte-identical packets on the same message ID — that is
+    // the point of sharing the encoder — so the packet cannot identify its own
+    // author, and a flag inside it would be a claim the ground could not check.
+    // The presence of the application's own housekeeping is evidence of a kind
+    // the packet cannot fake.
     if telemetry.freshness != Freshness::NoData {
-        return (telemetry.state, Sources::ALL_DEMO, Pipeline::Demo);
+        let (sources, pipeline) = if hk.rust_app.is_some() {
+            (Sources::ALL_FLIGHT, Pipeline::Flight)
+        } else {
+            (Sources::ALL_STANDIN, Pipeline::Standin)
+        };
+        return (telemetry.state, sources, pipeline);
     }
 
     let Some(sample_app) = hk.sample_app else {
@@ -216,28 +264,34 @@ pub fn resolve(
 /// Deterministic state for `--offline`, used by screenshots and by anyone
 /// without a container.
 ///
-/// Shaped like the Phase 3 spike's synthetic source so captures from the two
-/// are comparable: hold, deploy, hold.
+/// Runs the real vehicle model forward from `t = 0` to `t`, rather than
+/// evaluating a closed-form curve. That costs a few thousand integration steps
+/// per frame at 60 Hz, which is nothing, and buys two things worth more: the
+/// offline pose is a pose the vehicle can actually reach, and an offline
+/// screenshot is comparable with a live one instead of merely resembling it.
+///
+/// Deterministic because [`vehicle_dyn::Vehicle`] is: same `t`, same step size,
+/// same state, which is what makes `--screenshot --at` reproducible.
 pub fn offline_state(t: f32) -> SpacecraftState {
-    let progress = ((t - 2.0) / 8.0).clamp(0.0, 1.0);
-    let mode = if t < 1.5 {
-        Mode::Safe
-    } else if t < 2.0 {
-        Mode::Nominal
-    } else if progress < 1.0 {
-        Mode::Deploying
-    } else {
-        Mode::Deployed
-    };
-    let yaw = t * 0.18;
-    SpacecraftState {
-        attitude: Quat([0.0, (yaw * 0.5).sin(), 0.0, (yaw * 0.5).cos()]),
-        solar_array_deg: t * 12.0,
-        deploy_progress: progress,
-        wheel_rpm: [t * 40.0, -t * 25.0, t * 10.0, 0.0],
-        mode,
+    /// Integration step. Fixed, and not the frame time: a screenshot at `--at
+    /// 12.0` must be the same frame whatever rate the renderer happened to hit.
+    const STEP: f32 = 1.0 / 120.0;
+
+    let mut vehicle = vehicle_dyn::Vehicle::new();
+    for _ in 0..((t.max(0.0) / STEP) as u32) {
+        vehicle.step(STEP);
     }
+    vehicle.state()
 }
+
+/// Seconds into the offline timeline at which the arrays are mid-travel.
+///
+/// The vehicle deploys itself once it has detumbled (see
+/// `vehicle_dyn::Vehicle::step_modes`), so this is an *observation* of the
+/// sequence rather than a choice about it — which is why it is pinned by
+/// `offline_deploys_partway_through` rather than just written in a comment.
+/// It is the `--at` value the committed deployment screenshot uses.
+pub const OFFLINE_MID_DEPLOY_S: f32 = 14.0;
 
 #[cfg(test)]
 mod tests {
@@ -249,32 +303,44 @@ mod tests {
             sample_app: Some(SampleAppHk { command_counter, command_error_counter: 0 }),
             to_lab: None,
             ci_lab: Some(CiLabHk { ingest_packets: ingest, ..Default::default() }),
+            rust_app: None,
             last_time: Some(time),
         }
     }
 
-    fn no_demo() -> Telemetry {
+    fn no_vehicle_packet() -> Telemetry {
         Telemetry { state: SpacecraftState::default(), freshness: Freshness::NoData }
+    }
+
+    fn live_vehicle_packet() -> Telemetry {
+        Telemetry {
+            state: SpacecraftState { solar_array_deg: 42.0, ..Default::default() },
+            freshness: Freshness::Live,
+        }
     }
 
     #[test]
     fn nothing_on_the_bus_means_nothing_claimed() {
         let (state, sources, pipeline) =
-            resolve(&no_demo(), &Housekeeping::default(), &mut Baseline::default());
+            resolve(&no_vehicle_packet(), &Housekeeping::default(), &mut Baseline::default());
         assert_eq!(pipeline, Pipeline::Waiting);
         assert_eq!(state, SpacecraftState::default());
         assert!(sources.rows().iter().all(|(_, s, _)| *s == Source::None));
     }
 
     /// The gap is the finding, so it is asserted rather than left to inspection.
+    ///
+    /// Still asserted now that `spikes/rust-cfs-app` fills it: this is the
+    /// behaviour against a cFS *without* that application loaded, which is what
+    /// a stock bundle is, and the claim in the README rests on it.
     #[test]
     fn stock_cfs_supplies_no_attitude_and_no_wheels() {
         let (state, sources, pipeline) =
-            resolve(&no_demo(), &hk_with(1, 50, 1000.0), &mut Baseline::default());
+            resolve(&no_vehicle_packet(), &hk_with(1, 50, 1000.0), &mut Baseline::default());
         assert_eq!(pipeline, Pipeline::Derived);
         assert_eq!(sources.attitude, Source::None);
         assert_eq!(sources.wheels, Source::None);
-        assert_eq!(state.attitude, Quat::IDENTITY);
+        assert_eq!(state.attitude, telemetry_model::Quat::IDENTITY);
         assert_eq!(state.wheel_rpm, [0.0; 4]);
     }
 
@@ -283,11 +349,12 @@ mod tests {
     #[test]
     fn counters_are_relative_to_the_moment_we_connected() {
         let mut baseline = Baseline::default();
-        let (first, _, _) = resolve(&no_demo(), &hk_with(0, 9_000, 1000.0), &mut baseline);
+        let (first, _, _) =
+            resolve(&no_vehicle_packet(), &hk_with(0, 9_000, 1000.0), &mut baseline);
         assert_eq!(first.deploy_progress, 0.0, "a long-running cFS started us mid-deploy");
         assert_eq!(first.solar_array_deg, 0.0);
 
-        let (later, _, _) = resolve(&no_demo(), &hk_with(0, 9_005, 1010.0), &mut baseline);
+        let (later, _, _) = resolve(&no_vehicle_packet(), &hk_with(0, 9_005, 1010.0), &mut baseline);
         assert!((later.deploy_progress - 0.5).abs() < 1e-6);
         assert!((later.solar_array_deg - 60.0).abs() < 1e-3);
     }
@@ -298,31 +365,88 @@ mod tests {
     fn array_angle_survives_a_realistic_mission_time() {
         let mut baseline = Baseline::default();
         let epoch = 1_456_000_000.0f64;
-        resolve(&no_demo(), &hk_with(0, 0, epoch), &mut baseline);
-        let (state, _, _) = resolve(&no_demo(), &hk_with(0, 0, epoch + 1.5), &mut baseline);
+        resolve(&no_vehicle_packet(), &hk_with(0, 0, epoch), &mut baseline);
+        let (state, _, _) =
+            resolve(&no_vehicle_packet(), &hk_with(0, 0, epoch + 1.5), &mut baseline);
         assert!((state.solar_array_deg - 9.0).abs() < 1e-3, "got {}", state.solar_array_deg);
     }
 
     #[test]
     fn each_no_op_steps_the_mode_and_wraps() {
         let seen: Vec<Mode> = (0u8..5)
-            .map(|c| resolve(&no_demo(), &hk_with(c, 0, 0.0), &mut Baseline::default()).0.mode)
+            .map(|c| {
+                resolve(&no_vehicle_packet(), &hk_with(c, 0, 0.0), &mut Baseline::default()).0.mode
+            })
             .collect();
         assert_eq!(seen, [Mode::Safe, Mode::Nominal, Mode::Deploying, Mode::Deployed, Mode::Safe]);
     }
 
-    /// A real vehicle-state payload must win, or connecting to `fake-cfs` would
-    /// show derived counters instead of the vehicle it is describing.
+    /// A real vehicle-state payload must win, or connecting to something
+    /// publishing vehicle state would show derived counters instead of the
+    /// vehicle it is describing.
     #[test]
     fn a_vehicle_payload_outranks_derivation() {
-        let telemetry = Telemetry {
-            state: SpacecraftState { solar_array_deg: 42.0, ..Default::default() },
-            freshness: Freshness::Live,
-        };
         let (state, sources, pipeline) =
-            resolve(&telemetry, &hk_with(3, 99, 1000.0), &mut Baseline::default());
-        assert_eq!(pipeline, Pipeline::Demo);
+            resolve(&live_vehicle_packet(), &hk_with(3, 99, 1000.0), &mut Baseline::default());
+        assert_eq!(pipeline, Pipeline::Standin);
         assert_eq!(state.solar_array_deg, 42.0);
-        assert_eq!(sources.attitude, Source::Demo);
+        assert_eq!(sources.attitude, Source::Standin);
+    }
+
+    /// The claim the panel makes — "this came from software running inside
+    /// cFE" — must rest on evidence the vehicle packet cannot manufacture.
+    /// `RUST_APP` housekeeping is that evidence.
+    #[test]
+    fn the_flight_claim_needs_the_flight_apps_own_housekeeping() {
+        let mut hk = hk_with(0, 0, 1000.0);
+        let (_, standin, pipeline) =
+            resolve(&live_vehicle_packet(), &hk, &mut Baseline::default());
+        assert_eq!(pipeline, Pipeline::Standin, "an identical packet claimed to be from flight");
+        assert_eq!(standin.attitude, Source::Standin);
+
+        hk.rust_app = Some(cfs_msg::rust_app::RustAppHk::default());
+        let (_, flight, pipeline) = resolve(&live_vehicle_packet(), &hk, &mut Baseline::default());
+        assert_eq!(pipeline, Pipeline::Flight);
+        assert!(matches!(flight.attitude, Source::Flight(_)));
+        assert!(
+            flight.rows().iter().all(|(_, s, _)| matches!(s, Source::Flight(_))),
+            "a signal was left unsourced with the flight app publishing"
+        );
+    }
+
+    /// `--offline` must produce a vehicle the model could actually have
+    /// reached, and produce the same one every time, or the committed
+    /// screenshots would drift.
+    #[test]
+    fn offline_state_is_deterministic_and_physical() {
+        let a = offline_state(20.0);
+        let b = offline_state(20.0);
+        assert_eq!(a, b, "offline state is not reproducible");
+
+        let n: f32 = a.attitude.0.iter().map(|v| v * v).sum();
+        assert!((n - 1.0).abs() < 1e-4, "attitude is not a unit quaternion: {n}");
+        assert!((0.0..=1.0).contains(&a.deploy_progress));
+
+        // Far enough along to have left Safe and be flying the survey.
+        assert_ne!(a.mode, Mode::Safe);
+    }
+
+    /// The offline timeline must reach the deployment on its own, and
+    /// [`OFFLINE_MID_DEPLOY_S`] must actually land inside it — otherwise the
+    /// committed screenshot of the mechanism would quietly become a screenshot
+    /// of a stowed or fully deployed vehicle after any tuning change.
+    #[test]
+    fn offline_deploys_partway_through() {
+        assert_eq!(offline_state(5.0).deploy_progress, 0.0, "deployed while still tumbling");
+
+        let mid = offline_state(OFFLINE_MID_DEPLOY_S).deploy_progress;
+        assert!(
+            mid > 0.05 && mid < 0.95,
+            "{OFFLINE_MID_DEPLOY_S}s is not mid-deploy any more: progress {mid}"
+        );
+        assert_eq!(offline_state(OFFLINE_MID_DEPLOY_S).mode, Mode::Deploying);
+
+        assert_eq!(offline_state(30.0).deploy_progress, 1.0, "never finished deploying");
+        assert_eq!(offline_state(30.0).mode, Mode::Deployed);
     }
 }

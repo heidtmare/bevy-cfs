@@ -12,7 +12,8 @@
 # Build context is the repo root (see compose.yaml) rather than this
 # directory, so this stage can also COPY in spikes/rust-cfs-app — the Phase 5
 # Rust-inside-cFS spike, built here rather than cross-compiled from the host
-# so its cdylib links against the same glibc as core-cpu1.
+# so its cdylib links against the same glibc as core-cpu1 — along with the
+# four no_std crates it shares with the ground software.
 
 FROM debian:bookworm AS build
 
@@ -56,6 +57,21 @@ RUN make native_std.prep \
 WORKDIR /rust-cfs-app-build
 COPY rust-toolchain.toml ./rust-toolchain.toml
 COPY spikes/rust-cfs-app ./spikes/rust-cfs-app
+# The application's path dependencies. These are the *same source files* the
+# visualizer compiles against — not a vendored copy — which is the whole claim
+# Architecture B rests on: one definition of the wire format and one
+# implementation of the vehicle model, compiled into both the ground software
+# and the flight software. Copying only these four keeps the build cache from
+# being invalidated by every edit to apps/viz.
+COPY crates/ccsds ./crates/ccsds
+COPY crates/cfs-msg ./crates/cfs-msg
+COPY crates/telemetry-model ./crates/telemetry-model
+COPY crates/vehicle-dyn ./crates/vehicle-dyn
+# The crates use `version.workspace = true` and friends, which need a workspace
+# root to inherit from. This stub supplies exactly those keys; the real root
+# manifest is not copied because it lists members (apps/viz, the tools) that
+# are deliberately absent from this image.
+COPY docker/crates-workspace.toml ./Cargo.toml
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --profile minimal

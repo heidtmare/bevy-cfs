@@ -13,6 +13,34 @@ Expect `CFE_ES_Main: CFE_ES_Main entering OPERATIONAL state`, then
 `CI_LAB listening on UDP port: 1234` and `TO Lab Initialized ... Awaiting enable
 command`.
 
+## What is in the image
+
+Besides cFS v7.0.1 itself, the image contains `cf/rust_app.so` — the Phase 5
+Rust cFE application, built in the same stage from `spikes/rust-cfs-app` plus
+the four `no_std` crates it shares with the ground software, and registered in
+`cfe_es_startup.scr` by a `sed` line in the Dockerfile. It flies the spacecraft
+`apps/viz` animates. Expect this in the log a second after startup:
+
+```
+EVS Port1 ... 66/1/RUST_APP 1: RUST_APP: flying. vehicle state on 0x0892 at 10 Hz,
+                               HK on 0x0891, commands on 0x1892
+```
+
+Those three message IDs are **not in any mission table** and are hand-picked;
+`to_lab` therefore does not forward the two telemetry ones until something asks
+it to at runtime, which `crates/cfs-link` does on connect. See
+[../docs/findings/0007-vehicle-dynamics-in-cfe.md](../docs/findings/0007-vehicle-dynamics-in-cfe.md)
+for how picking them went wrong twice, and this, which is the check to repeat if
+`CFS_REF` ever changes:
+
+```sh
+docker build --target build -f docker/Dockerfile -t cfs-build .
+# nothing else may publish the telemetry IDs...
+docker run --rm cfs-build od -A d -t x4 /src/build-native_std/exe/cpu1/cf/to_lab_sub.tbl
+# ...and nothing else may be sent the command ID
+docker run --rm cfs-build od -A d -t x4 /src/build-native_std/exe/cpu1/cf/sch_lab_table.tbl
+```
+
 ## Ports
 
 | Port | Direction | What |
@@ -97,7 +125,8 @@ IDs — which were fine.
 
 `CFS_REF` is pinned to `v7.0.1` in `compose.yaml`. Changing it invalidates the
 committed fixtures and possibly every message ID, so it is a deliberate act:
-re-capture, re-run the golden tests, and write a new finding.
+re-capture, re-run the golden tests, re-run the two table dumps above, and write
+a new finding.
 
 Switching to the **`native_eds`** config (EDS enabled, the interesting Phase 1
 question) is a one-word change in the Dockerfile's `make` lines — but expect

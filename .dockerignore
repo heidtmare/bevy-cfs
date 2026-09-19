@@ -1,6 +1,7 @@
-# docker/Dockerfile only COPYs in rust-toolchain.toml and spikes/rust-cfs-app,
-# but the build context (repo root, see docker/compose.yaml) is sent to the
-# Docker daemon in full unless trimmed here — this keeps that send fast.
+# The build context is the repo root (see docker/compose.yaml) and is sent to
+# the Docker daemon in full unless trimmed here. The Dockerfile needs
+# rust-toolchain.toml, spikes/rust-cfs-app, docker/, and the four no_std crates
+# the flight application shares with the ground software — nothing else.
 target
 spikes/rust-cfs-app/target
 .git
@@ -8,5 +9,11 @@ docs
 assets
 fixtures
 apps
-crates
 tools
+
+# `crates` is not excluded wholesale: four of them are compiled into the flight
+# application. Excluding the rest keeps a Bevy plugin out of a flight-software
+# build context, and keeps an edit to it from invalidating this image's cache.
+crates/bevy_cfs
+crates/cfs-link
+crates/telemetry-anim

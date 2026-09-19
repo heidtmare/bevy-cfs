@@ -7,6 +7,11 @@
 # Folding it into `cargo build --workspace` would break that for everyone on
 # a Mac or in CI. Build it explicitly, inside the container:
 #   cargo build -p rust-cfs-app --manifest-path spikes/rust-cfs-app/Cargo.toml
+#
+# The `crates/*` path dependencies below reach back into the root workspace's
+# source *without* joining it, which is the arrangement Architecture B was
+# meant to test: the same no_std crates the ground software uses, compiled
+# into flight software, with no second copy and no shared build.
 
 [package]
 name = "rust-cfs-app"
@@ -15,7 +20,7 @@ edition = "2024"
 rust-version = "1.96"
 license = "Apache-2.0"
 publish = false
-description = "Phase 5 spike: a cFE ES application written in Rust, loaded as a dynamic module."
+description = "Phase 5 spike: a cFE ES application written in Rust, computing vehicle dynamics and publishing them on the software bus."
 
 [lib]
 # cFE's ES loader dlopen()s this like any C app .so. There is no Rust code on
@@ -26,3 +31,12 @@ crate-type = ["cdylib"]
 bindgen = "0.72"
 
 [dependencies]
+# no_std + libm, not the std default. The app links libc through cFE anyway, so
+# `std` would build — but taking it would make this crate stop testing the
+# thing it exists to test, namely that the reusable crates really are usable
+# without a hosted runtime. libm is a pure-Rust soft-float library with no
+# platform assumptions, which is the dependency a real flight target could keep.
+ccsds = { path = "../../crates/ccsds", default-features = false }
+cfs-msg = { path = "../../crates/cfs-msg", default-features = false }
+telemetry-model = { path = "../../crates/telemetry-model", default-features = false, features = ["libm"] }
+vehicle-dyn = { path = "../../crates/vehicle-dyn", default-features = false, features = ["libm"] }

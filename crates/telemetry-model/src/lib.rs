@@ -5,9 +5,12 @@
 //! several ways to drive animation from these values; all of them consume
 //! [`SpacecraftState`], which is what keeps that comparison honest.
 //!
-//! The field set here is a placeholder standing in for a real mission's
-//! telemetry. It exists so the full pipeline runs end to end before any real
-//! packet layout is known — replace it once Phase 1 pins the actual packets.
+//! The field set here began as a placeholder standing in for a real mission's
+//! telemetry, so that the pipeline could run end to end before any real packet
+//! layout was known. It is no longer a placeholder: `crates/vehicle-dyn` fills
+//! a [`SpacecraftState`] from inside a live cFE application and publishes it
+//! with [`encode_vehicle_state`], which is the same function the tests and
+//! `tools/fake-cfs` use. This struct is a wire contract now, not a sketch.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -148,20 +151,29 @@ pub struct Sample {
     pub state: SpacecraftState,
 }
 
-/// Payload layout emitted by `tools/fake-cfs`, and the format the demo decoder
-/// understands. Little-endian, matching a native x86/ARM cFS build's struct
-/// packing.
+/// Payload layout of the vehicle-state telemetry packet. Little-endian,
+/// matching a native x86/ARM cFS build's struct packing.
 ///
-/// This is a stand-in for a real mission's vehicle-dynamics packet; stock cFS
-/// publishes nothing like it. The *framing* around it is not a stand-in,
-/// though: it sits at [`DEMO_PAYLOAD_OFFSET`], behind a real
-/// `CFE_MSG_TelemetryHeader_t`, so a mapping bug in the offline path is the
-/// same bug it would be against live cFS.
+/// This was a stand-in for a real mission's vehicle-dynamics packet, because
+/// stock cFS publishes nothing like it. It is not a stand-in any more:
+/// `spikes/rust-cfs-app` is a cFE application that computes vehicle dynamics
+/// inside a live cFS and publishes exactly this layout onto the software bus,
+/// by calling [`encode_vehicle_state`] — this function, this code — from the
+/// flight side. `tools/fake-cfs` calls it too, so the three producers and the
+/// one consumer cannot disagree about the layout.
+///
+/// That shared definition is the whole argument. There is no second copy of
+/// these offsets in a C header to drift out of sync, and the round-trip test
+/// below covers the flight encoder as much as the ground decoder.
 ///
 /// Endianness is settled for the pinned build — little-endian, measured in
 /// `crates/cfs-msg/tests/real_payloads.rs` — but it is a property of the
-/// *target*, not of cFS, and a big-endian flight target would flip it.
-pub const DEMO_PAYLOAD_LEN: usize = 4 * 4 + 4 + 4 + 4 * 4 + 1;
+/// *target*, not of cFS, and a big-endian flight target would flip it. Both
+/// ends being compiled from this one function does not save you there: they
+/// would agree with each other and disagree with the wire only if they were
+/// built for different targets, which is precisely the case a mission with a
+/// big-endian flight processor and a little-endian ground station is in.
+pub const VEHICLE_PAYLOAD_LEN: usize = 4 * 4 + 4 + 4 + 4 * 4 + 1;
 
 /// Octet at which a cFE telemetry payload begins: 6 primary + 6 timestamp + 4
 /// spare.
@@ -170,16 +182,17 @@ pub const DEMO_PAYLOAD_LEN: usize = 4 * 4 + 4 + 4 + 4 * 4 + 1;
 /// stand-in whose framing differs from the real thing trains the decoder on the
 /// wrong layout. That is not hypothetical — the four octets were missing here
 /// until the first real payload was decoded in Phase 4.
-pub const DEMO_PAYLOAD_OFFSET: usize =
+pub const VEHICLE_PAYLOAD_OFFSET: usize =
     ccsds::PRIMARY_HEADER_LEN + ccsds::TlmSecondaryHeader::LEN + ccsds::CFE_TLM_SPARE_LEN;
 
 /// Encode a state into the demo payload layout.
 ///
-/// The exact inverse of [`decode_demo`]'s payload half. Shared by `fake-cfs` and
-/// the tests so a layout change cannot silently desynchronize the generator from
-/// the decoder — the round-trip test below fails instead.
-pub fn encode_demo_payload(state: &SpacecraftState, out: &mut [u8; DEMO_PAYLOAD_LEN]) {
-    let put = |out: &mut [u8; DEMO_PAYLOAD_LEN], off: usize, v: f32| {
+/// The exact inverse of [`decode_vehicle_state`]'s payload half. Shared by the
+/// flight application, `fake-cfs` and the tests, so a layout change cannot
+/// silently desynchronize a producer from the decoder — the round-trip test
+/// below fails instead.
+pub fn encode_vehicle_state(state: &SpacecraftState, out: &mut [u8; VEHICLE_PAYLOAD_LEN]) {
+    let put = |out: &mut [u8; VEHICLE_PAYLOAD_LEN], off: usize, v: f32| {
         out[off..off + 4].copy_from_slice(&v.to_le_bytes());
     };
     for (i, v) in state.attitude.0.iter().enumerate() {
@@ -193,12 +206,12 @@ pub fn encode_demo_payload(state: &SpacecraftState, out: &mut [u8; DEMO_PAYLOAD_
     out[40] = state.mode as u8;
 }
 
-/// Decode a demo telemetry packet into a [`Sample`].
+/// Decode a vehicle-state telemetry packet into a [`Sample`].
 ///
 /// Returns `None` for any packet that is not the expected message ID or is the
 /// wrong size — a viz should ignore traffic it does not understand rather than
 /// fail, since a live software bus carries plenty of it.
-pub fn decode_demo(pkt: &SpacePacket<'_>, expected: MsgId) -> Option<Sample> {
+pub fn decode_vehicle_state(pkt: &SpacePacket<'_>, expected: MsgId) -> Option<Sample> {
     if pkt.primary().stream_id() != expected.0 {
         return None;
     }
@@ -206,7 +219,7 @@ pub fn decode_demo(pkt: &SpacePacket<'_>, expected: MsgId) -> Option<Sample> {
     // `cfe_tlm_payload`, not `payload`: cFE pads the telemetry header to 16
     // octets. See `ccsds::CFE_TLM_SPARE_LEN`.
     let p = pkt.cfe_tlm_payload().ok()?;
-    if p.len() < DEMO_PAYLOAD_LEN {
+    if p.len() < VEHICLE_PAYLOAD_LEN {
         return None;
     }
 
@@ -270,21 +283,21 @@ mod tests {
             wheel_rpm: [1000.0, -250.5, 0.0, 42.25],
             mode: Mode::Deploying,
         };
-        let mut payload = [0u8; DEMO_PAYLOAD_LEN];
-        encode_demo_payload(&state, &mut payload);
+        let mut payload = [0u8; VEHICLE_PAYLOAD_LEN];
+        encode_vehicle_state(&state, &mut payload);
 
-        let total = DEMO_PAYLOAD_OFFSET + DEMO_PAYLOAD_LEN;
-        let mut pkt = [0u8; DEMO_PAYLOAD_OFFSET + DEMO_PAYLOAD_LEN];
+        let total = VEHICLE_PAYLOAD_OFFSET + VEHICLE_PAYLOAD_LEN;
+        let mut pkt = [0u8; VEHICLE_PAYLOAD_OFFSET + VEHICLE_PAYLOAD_LEN];
         PrimaryHeader::for_total_len(0x083, PacketType::Telemetry, true, 5, total)
             .unwrap()
             .write(&mut pkt[..6])
             .unwrap();
         TlmSecondaryHeader { seconds: 1000, subseconds: 0x8000 }.write(&mut pkt[6..12]).unwrap();
         // pkt[12..16] stays zero: the cFE alignment spare.
-        pkt[DEMO_PAYLOAD_OFFSET..].copy_from_slice(&payload);
+        pkt[VEHICLE_PAYLOAD_OFFSET..].copy_from_slice(&payload);
 
         let parsed = SpacePacket::parse(&pkt).unwrap();
-        let sample = decode_demo(&parsed, MsgId(0x0883)).expect("round trip");
+        let sample = decode_vehicle_state(&parsed, MsgId(0x0883)).expect("round trip");
         assert_eq!(sample.state, state);
         assert!((sample.time - 1000.5).abs() < 1e-9);
         assert_eq!(sample.seq_count, 5);

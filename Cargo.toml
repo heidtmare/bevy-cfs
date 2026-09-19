@@ -8,6 +8,7 @@ members = [
     "crates/cfs-link",
     "crates/telemetry-model",
     "crates/telemetry-anim",
+    "crates/vehicle-dyn",
     "tools/fake-cfs",
     "tools/tlm-capture",
     "tools/gltf-gen",
@@ -31,4 +32,5 @@ cfs-msg = { path = "crates/cfs-msg", default-features = false }
 cfs-link = { path = "crates/cfs-link" }
 telemetry-model = { path = "crates/telemetry-model", default-features = false }
 telemetry-anim = { path = "crates/telemetry-anim", default-features = false }
+vehicle-dyn = { path = "crates/vehicle-dyn", default-features = false }
 bevy_cfs = { path = "crates/bevy_cfs" }

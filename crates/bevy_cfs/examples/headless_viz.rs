@@ -57,7 +57,9 @@ fn main() {
                 ..Default::default()
             },
             buffer: BufferConfig::for_rate(1.0 / rate),
-            tlm_msg_id: MsgIds::LAB_DEFAULTS.sample_app_hk_tlm,
+            // The vehicle-state message, which `fake-cfs` and the Rust cFE
+            // application both publish on.
+            tlm_msg_id: MsgIds::LAB_DEFAULTS.rust_app_vehicle_tlm,
             connect: true,
         })
         .add_systems(Update, report)
